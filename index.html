@@ -57,12 +57,13 @@ const C={bg:"#0f1117",surface:"#181c27",card:"#1e2235",border:"#2a3050",
   accent:"#6c8fff",al:"#8facff",green:"#4ecb8b",yellow:"#f5c842",red:"#ff6b6b",text:"#e8eaf6",muted:"#7b83a6"};
 
 // ── STORAGE ──────────────────────────────────────────────────────────────────
-const SK="sonia_v4";
+const SK="sonia_v5";
 const SEED={
   therapist:{name:"",specialty:"Psicología Clínica",cedula:"",address:"",phone:"",email:"",
     payments:[{id:1,label:"CLABE",value:""},{id:2,label:"Mercado Pago",value:""}]},
   patients:[],appointments:[],payments:[],notes:[],
-  apiKey:""
+  apiKey:"",
+  // patients now carry: frequency ("weekly"|"biweekly"|"none"), preferredDay (0-6), preferredTime ("HH:00")
 };
 const loadData=()=>{try{const d=localStorage.getItem(SK);return d?{...SEED,...JSON.parse(d)}:SEED;}catch{return SEED;}};
 const saveData=d=>{try{localStorage.setItem(SK,JSON.stringify(d));}catch{}};
@@ -462,14 +463,72 @@ Si pide pagos pendientes, lista cada paciente con monto.`;
   );
 }
 
+// ── FREQUENCY HELPERS ────────────────────────────────────────────────────────
+const FREQ_LABELS = {none:"Sin frecuencia fija",weekly:"Semanal",biweekly:"Quincenal"};
+const DAY_NAMES = ["Domingo","Lunes","Martes","Miércoles","Jueves","Viernes","Sábado"];
+const DAY_SHORT = ["Dom","Lun","Mar","Mié","Jue","Vie","Sáb"];
+
+// Given a patient's frequency settings and their existing appointments, compute
+// the next suggested date after the last confirmed/done appointment.
+function computeNextSuggested(patient, appointments){
+  const {frequency, preferredDay, preferredTime} = patient;
+  if(!frequency || frequency==="none" || preferredDay===undefined || !preferredTime) return null;
+  const intervalDays = frequency==="weekly" ? 7 : 14;
+
+  // Find the most recent confirmed/done appointment for this patient
+  const pAppts = appointments
+    .filter(a=>a.patientId===patient.id && (a.status==="confirmed"||a.status==="done"))
+    .sort((a,b)=>b.date.localeCompare(a.date));
+
+  let baseDate;
+  if(pAppts.length>0){
+    // Start from last appointment + interval
+    baseDate = new Date(pAppts[0].date+"T12:00:00");
+    baseDate.setDate(baseDate.getDate()+intervalDays);
+  } else {
+    // No appointments yet — start from today
+    baseDate = new Date(TODAY+"T12:00:00");
+  }
+
+  // Advance to the preferred day of week
+  const targetDow = parseInt(preferredDay);
+  let candidate = new Date(baseDate);
+  // Find next occurrence of preferredDay on or after baseDate
+  let tries = 0;
+  while(candidate.getDay() !== targetDow && tries < 14){
+    candidate.setDate(candidate.getDate()+1);
+    tries++;
+  }
+  // If that date is in the past, add one interval
+  const candidateStr = candidate.toISOString().split("T")[0];
+  if(candidateStr < TODAY){
+    candidate.setDate(candidate.getDate()+intervalDays);
+    // Re-align to preferred day
+    tries=0;
+    while(candidate.getDay()!==targetDow && tries<14){
+      candidate.setDate(candidate.getDate()+1);tries++;
+    }
+  }
+
+  return {date: candidate.toISOString().split("T")[0], time: preferredTime};
+}
+
 // ── PATIENT PROFILE ──────────────────────────────────────────────────────────
 function PatientProfile({patient,data,setData,onBack}){
   const {appointments,payments,notes}=data;
   const [tab,setT]=useState("resumen");
   const [noteModal,setNM]=useState(false);
   const [payModal,setPM]=useState(false);
+  const [freqModal,setFM]=useState(false);
   const [nf,setNF]=useState({content:"",session:"",date:TODAY});
   const [pf,setPF]=useState({amount:String(DEFAULT_FEE),method:"efectivo",concept:"",date:TODAY});
+  // Frequency draft — initialised from patient data
+  const [ff,setFF]=useState({
+    frequency: patient.frequency||"none",
+    preferredDay: patient.preferredDay!==undefined ? String(patient.preferredDay) : "1",
+    preferredTime: patient.preferredTime||"10:00",
+  });
+  const [schedulePreview,setSchedulePreview]=useState(null);
 
   const pA=appointments.filter(a=>a.patientId===patient.id).sort((a,b)=>b.date.localeCompare(a.date));
   const pP=payments.filter(p=>p.patientId===patient.id).sort((a,b)=>b.date.localeCompare(a.date));
@@ -478,8 +537,48 @@ function PatientProfile({patient,data,setData,onBack}){
   const pend=pP.filter(p=>p.status==="pending").reduce((s,p)=>s+p.amount,0);
   const next=pA.find(a=>a.date>=TODAY&&a.status!=="cancelled");
 
+  // Compute suggestion from current saved patient settings
+  const suggestion = useMemo(()=>computeNextSuggested(patient, appointments),[patient, appointments]);
+
   const addNote=()=>{if(!nf.content)return;setData(d=>({...d,notes:[...d.notes,{id:Date.now(),patientId:patient.id,date:nf.date,session:parseInt(nf.session)||pN.length+1,content:nf.content,private:true}]}));setNM(false);setNF({content:"",session:"",date:TODAY});};
   const addPay=()=>{const amt=parseInt(pf.amount);if(!amt)return;setData(d=>({...d,payments:[...d.payments,{id:Date.now(),patientId:patient.id,patientName:patient.name,date:pf.date,amount:amt,method:pf.method,concept:pf.concept||"Pago",status:"paid"}]}));setPM(false);setPF({amount:String(DEFAULT_FEE),method:"efectivo",concept:"",date:TODAY});};
+
+  const saveFrequency=()=>{
+    const updated={...patient, frequency:ff.frequency, preferredDay:parseInt(ff.preferredDay), preferredTime:ff.preferredTime};
+    setData(d=>({...d,patients:d.patients.map(p=>p.id===patient.id?updated:p)}));
+    setFM(false);
+  };
+
+  const scheduleNext=()=>{
+    if(!suggestion)return;
+    // Check if a confirmed appt already exists on that date/time for this patient
+    const clash=appointments.find(a=>a.patientId===patient.id&&a.date===suggestion.date&&a.time===suggestion.time&&a.status!=="cancelled");
+    if(clash){alert(`Ya existe una cita el ${suggestion.date} a las ${suggestion.time}`);return;}
+    const newAppt={id:Date.now(),patientId:patient.id,patientName:patient.name,date:suggestion.date,time:suggestion.time,duration:50,status:"confirmed",fee:DEFAULT_FEE};
+    setData(d=>({...d,appointments:[...d.appointments,newAppt]}));
+    setSchedulePreview(suggestion);
+    setTimeout(()=>setSchedulePreview(null),3500);
+  };
+
+  // Generate preview of next N sessions
+  const previewSessions = useMemo(()=>{
+    if(!patient.frequency||patient.frequency==="none"||patient.preferredDay===undefined||!patient.preferredTime) return [];
+    const intervalDays = patient.frequency==="weekly"?7:14;
+    const result=[];
+    const pConfirmed=appointments.filter(a=>a.patientId===patient.id&&(a.status==="confirmed"||a.status==="done")).sort((a,b)=>b.date.localeCompare(a.date));
+    let cursor = pConfirmed.length>0 ? new Date(pConfirmed[0].date+"T12:00:00") : new Date(TODAY+"T12:00:00");
+    const targetDow=parseInt(patient.preferredDay);
+    for(let i=0;i<6;i++){
+      cursor.setDate(cursor.getDate()+intervalDays);
+      let tries=0;
+      while(cursor.getDay()!==targetDow&&tries<14){cursor.setDate(cursor.getDate()+1);tries++;}
+      const ds=cursor.toISOString().split("T")[0];
+      const existing=appointments.find(a=>a.patientId===patient.id&&a.date===ds&&a.status!=="cancelled");
+      result.push({date:ds,time:patient.preferredTime,exists:!!existing});
+      cursor=new Date(cursor); // clone
+    }
+    return result;
+  },[patient,appointments]);
 
   const SC={confirmed:C.accent,done:C.green,pending:C.yellow,cancelled:C.muted};
   const SL={confirmed:"Confirmada",done:"Realizada",pending:"Pendiente",cancelled:"Cancelada"};
@@ -487,12 +586,16 @@ function PatientProfile({patient,data,setData,onBack}){
   const ML={efectivo:"Efectivo",digital:"Digital",pendiente:"Pendiente"};
   const tabs=[{id:"resumen",l:"Resumen"},{id:"sesiones",l:`Sesiones(${pA.length})`},{id:"pagos",l:`Pagos(${pP.length})`},{id:"notas",l:`Notas(${pN.length})`}];
 
+  const freqColor = patient.frequency==="weekly"?C.accent:patient.frequency==="biweekly"?C.green:C.muted;
+
   return (
     <div className="fi">
       <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14}}>
         <button onClick={onBack} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,color:C.muted,fontSize:18,padding:"6px 12px"}}>←</button>
         <div><div style={{fontWeight:600}}>{patient.name}</div><div style={{fontSize:11,color:C.muted}}>desde {patient.since}</div></div>
       </div>
+
+      {/* Hero card */}
       <Card style={{marginBottom:14,background:`linear-gradient(135deg,${C.card},${C.surface})`}}>
         <div style={{display:"flex",gap:12,alignItems:"center",marginBottom:10}}>
           <Av name={patient.name} size={48}/>
@@ -502,14 +605,90 @@ function PatientProfile({patient,data,setData,onBack}){
             {patient.phone&&<div style={{fontSize:12,color:C.muted}}>{patient.phone}</div>}
           </div>
         </div>
-        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
           {next?<Badge color={C.accent}>📅 {next.date} {next.time}</Badge>:<Badge color={C.muted}>Sin próxima cita</Badge>}
           {pend>0&&<Badge color={C.yellow}>⚠ ${pend.toLocaleString()}</Badge>}
+          <Badge color={freqColor}>🔁 {FREQ_LABELS[patient.frequency||"none"]}</Badge>
         </div>
       </Card>
+
+      {/* ── FREQUENCY CARD ─────────────────────────────────────────── */}
+      <Card style={{marginBottom:14,borderColor:patient.frequency&&patient.frequency!=="none"?freqColor+"55":C.border}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:patient.frequency&&patient.frequency!=="none"?12:0}}>
+          <div>
+            <div style={{fontSize:12,fontWeight:600,color:C.muted,textTransform:"uppercase",letterSpacing:.5,marginBottom:3}}>🔁 Frecuencia de agenda</div>
+            {patient.frequency&&patient.frequency!=="none"?(
+              <div style={{fontSize:13,color:C.text}}>
+                <span style={{color:freqColor,fontWeight:600}}>{FREQ_LABELS[patient.frequency]}</span>
+                {" · "}{DAY_NAMES[patient.preferredDay||1]}s{" · "}{patient.preferredTime}
+              </div>
+            ):(
+              <div style={{fontSize:12,color:C.muted}}>Sin frecuencia configurada</div>
+            )}
+          </div>
+          <button onClick={()=>{setFF({frequency:patient.frequency||"none",preferredDay:String(patient.preferredDay!==undefined?patient.preferredDay:1),preferredTime:patient.preferredTime||"10:00"});setFM(true);}}
+            style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,color:C.muted,padding:"6px 12px",fontSize:12,flexShrink:0}}>
+            ✏ Editar
+          </button>
+        </div>
+
+        {/* Suggestion + auto-schedule button */}
+        {suggestion&&(
+          <div style={{background:C.bg,borderRadius:10,padding:"10px 14px",display:"flex",justifyContent:"space-between",alignItems:"center",gap:10}}>
+            <div>
+              <div style={{fontSize:11,color:C.muted,marginBottom:2}}>PRÓXIMA SUGERIDA</div>
+              <div style={{fontSize:13,fontWeight:600,color:C.text}}>{suggestion.date} · {suggestion.time}</div>
+              <div style={{fontSize:11,color:C.muted}}>{DAY_SHORT[new Date(suggestion.date+"T12:00:00").getDay()]}</div>
+            </div>
+            <button onClick={scheduleNext}
+              style={{background:C.accent,color:"#fff",borderRadius:9,padding:"8px 14px",fontSize:12,fontWeight:600,flexShrink:0,border:"none"}}>
+              + Agendar
+            </button>
+          </div>
+        )}
+
+        {/* Toast confirmation */}
+        {schedulePreview&&(
+          <div style={{marginTop:8,background:C.green+"18",border:`1px solid ${C.green}44`,borderRadius:8,padding:"8px 12px",fontSize:12,color:C.green}}>
+            ✓ Cita agendada: {schedulePreview.date} {schedulePreview.time}
+          </div>
+        )}
+
+        {/* Upcoming sessions preview */}
+        {previewSessions.length>0&&(
+          <div style={{marginTop:12}}>
+            <div style={{fontSize:11,color:C.muted,marginBottom:8,textTransform:"uppercase",letterSpacing:.5}}>Próximas sesiones proyectadas</div>
+            <div style={{display:"flex",flexDirection:"column",gap:5}}>
+              {previewSessions.map((s,i)=>(
+                <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 10px",background:s.exists?C.green+"0f":C.bg,borderRadius:8,border:`1px solid ${s.exists?C.green+"33":C.border}`}}>
+                  <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                    <span style={{fontSize:10,color:C.muted,minWidth:24}}>{DAY_SHORT[new Date(s.date+"T12:00:00").getDay()]}</span>
+                    <span style={{fontSize:13,color:C.text}}>{s.date}</span>
+                    <span style={{fontSize:12,color:C.muted}}>{s.time}</span>
+                  </div>
+                  {s.exists
+                    ?<span style={{fontSize:10,color:C.green}}>✓ Agendada</span>
+                    :<button onClick={()=>{
+                        const clash=appointments.find(a=>a.patientId===patient.id&&a.date===s.date&&a.time===s.time&&a.status!=="cancelled");
+                        if(clash)return;
+                        setData(d=>({...d,appointments:[...d.appointments,{id:Date.now(),patientId:patient.id,patientName:patient.name,date:s.date,time:s.time,duration:50,status:"confirmed",fee:DEFAULT_FEE}]}));
+                      }}
+                      style={{background:"transparent",border:`1px solid ${C.accent}66`,borderRadius:6,color:C.accent,fontSize:11,padding:"3px 10px"}}>
+                      + Agendar
+                    </button>
+                  }
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </Card>
+
+      {/* Tabs */}
       <div style={{display:"flex",gap:6,marginBottom:12,overflowX:"auto",paddingBottom:4}}>
         {tabs.map(t=><button key={t.id} className="pill" onClick={()=>setT(t.id)} style={{background:tab===t.id?C.accent:"transparent",color:tab===t.id?"#fff":C.muted,borderColor:tab===t.id?C.accent:C.border}}>{t.l}</button>)}
       </div>
+
       {tab==="resumen"&&(
         <div style={{display:"flex",flexDirection:"column",gap:10}}>
           <div style={{display:"flex",gap:10}}><Stat label="Sesiones" value={pA.filter(a=>a.status==="done").length} sub={`${pA.length} total`} color={C.al}/><Stat label="Cobrado" value={`$${paid.toLocaleString()}`} color={C.green}/></div>
@@ -557,6 +736,80 @@ function PatientProfile({patient,data,setData,onBack}){
           </div>
         </div>
       )}
+
+      {/* ── FREQUENCY MODAL ─────────────────────────────────────────── */}
+      {freqModal&&(
+        <Sheet onClose={()=>setFM(false)} title={`Frecuencia — ${patient.name}`}>
+          <div style={{display:"flex",flexDirection:"column",gap:16}}>
+
+            {/* Frequency selector */}
+            <div>
+              <div style={{fontSize:11,color:C.muted,fontWeight:500,letterSpacing:.5,textTransform:"uppercase",marginBottom:8}}>Frecuencia</div>
+              <div style={{display:"flex",gap:8}}>
+                {["none","weekly","biweekly"].map(f=>(
+                  <button key={f} onClick={()=>setFF(d=>({...d,frequency:f}))}
+                    style={{flex:1,padding:"10px 6px",borderRadius:10,border:`2px solid ${ff.frequency===f?(f==="weekly"?C.accent:f==="biweekly"?C.green:C.muted):C.border}`,background:ff.frequency===f?(f==="weekly"?C.accent+"22":f==="biweekly"?C.green+"22":C.surface):C.surface,color:ff.frequency===f?(f==="weekly"?C.accent:f==="biweekly"?C.green:C.muted):C.muted,fontSize:12,fontWeight:600,transition:"all .15s",textAlign:"center"}}>
+                    {f==="none"?"Sin frecuencia":f==="weekly"?"Semanal":"Quincenal"}
+                    {f==="weekly"&&<div style={{fontSize:10,fontWeight:400,marginTop:2}}>cada 7 días</div>}
+                    {f==="biweekly"&&<div style={{fontSize:10,fontWeight:400,marginTop:2}}>cada 14 días</div>}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {ff.frequency!=="none"&&(
+              <>
+                {/* Day selector */}
+                <div>
+                  <div style={{fontSize:11,color:C.muted,fontWeight:500,letterSpacing:.5,textTransform:"uppercase",marginBottom:8}}>Día preferido</div>
+                  <div style={{display:"flex",gap:5}}>
+                    {[1,2,3,4,5,6,0].map(d=>(
+                      <button key={d} onClick={()=>setFF(f=>({...f,preferredDay:String(d)}))}
+                        style={{flex:1,padding:"8px 0",borderRadius:8,border:`1px solid ${ff.preferredDay===String(d)?C.accent:C.border}`,background:ff.preferredDay===String(d)?C.accent:C.surface,color:ff.preferredDay===String(d)?"#fff":C.muted,fontSize:11,fontWeight:500}}>
+                        {DAY_SHORT[d]}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Time selector */}
+                <div>
+                  <div style={{fontSize:11,color:C.muted,fontWeight:500,letterSpacing:.5,textTransform:"uppercase",marginBottom:8}}>Hora preferida</div>
+                  <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+                    {WORK_HOURS.map(h=>(
+                      <button key={h} onClick={()=>setFF(f=>({...f,preferredTime:h}))}
+                        style={{padding:"7px 12px",borderRadius:8,border:`1px solid ${ff.preferredTime===h?C.accent:C.border}`,background:ff.preferredTime===h?C.accent:C.surface,color:ff.preferredTime===h?"#fff":C.muted,fontSize:12,fontWeight:500}}>
+                        {h}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Preview of next suggested */}
+                {(()=>{
+                  const previewPatient={...patient,frequency:ff.frequency,preferredDay:parseInt(ff.preferredDay),preferredTime:ff.preferredTime};
+                  const s=computeNextSuggested(previewPatient,appointments);
+                  if(!s)return null;
+                  return (
+                    <div style={{background:C.bg,borderRadius:10,padding:"10px 14px",border:`1px solid ${C.border}`}}>
+                      <div style={{fontSize:11,color:C.muted,marginBottom:4}}>PRÓXIMA SESIÓN SUGERIDA</div>
+                      <div style={{fontSize:14,fontWeight:600,color:C.text}}>{s.date} · {s.time}</div>
+                      <div style={{fontSize:11,color:C.muted}}>{DAY_NAMES[new Date(s.date+"T12:00:00").getDay()]}</div>
+                    </div>
+                  );
+                })()}
+              </>
+            )}
+
+            <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:4}}>
+              <Btn variant="ghost" onClick={()=>setFM(false)}>Cancelar</Btn>
+              <Btn onClick={saveFrequency}>Guardar</Btn>
+            </div>
+          </div>
+        </Sheet>
+      )}
+
+      {/* ── NOTE MODAL ───────────────────────────────────────────────── */}
       {noteModal&&(
         <Sheet onClose={()=>setNM(false)} title={`Nota — ${patient.name}`}>
           <div style={{display:"flex",flexDirection:"column",gap:14}}>
@@ -567,6 +820,8 @@ function PatientProfile({patient,data,setData,onBack}){
           </div>
         </Sheet>
       )}
+
+      {/* ── PAY MODAL ────────────────────────────────────────────────── */}
       {payModal&&(
         <Sheet onClose={()=>setPM(false)} title={`Cobro — ${patient.name}`}>
           <div style={{display:"flex",flexDirection:"column",gap:14}}>
@@ -627,7 +882,7 @@ function Pacientes({data,setData}){
                   <Av name={p.name}/>
                   <div style={{flex:1,cursor:"pointer"}} onClick={()=>setSel(p)}>
                     <div style={{fontWeight:600,fontSize:14}}>{p.name}</div>
-                    <div style={{fontSize:11,color:C.muted,marginTop:2}}>{appts.length} sesiones · {nn} notas{next?` · 📅 ${next.date}`:""}</div>
+                    <div style={{fontSize:11,color:C.muted,marginTop:2}}>{appts.length} sesiones · {nn} notas{next?` · 📅 ${next.date}`:""}{p.frequency&&p.frequency!=="none"?` · 🔁 ${p.frequency==="weekly"?"Sem.":"Qnc."}`:""}</div>
                   </div>
                   <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:4}}>
                     {pend>0&&<Badge color={C.yellow}>${pend.toLocaleString()}</Badge>}
