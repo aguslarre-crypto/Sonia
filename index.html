@@ -228,7 +228,7 @@ const C={bg:"#0f1117",surface:"#181c27",card:"#1e2235",border:"#2a3050",
   accent:"#6c8fff",al:"#8facff",green:"#4ecb8b",yellow:"#f5c842",red:"#ff6b6b",text:"#e8eaf6",muted:"#7b83a6"};
 
 // ── STORAGE ──────────────────────────────────────────────────────────────────
-const SK="sonia_v6";
+const SK="sonia_v7";
 const SEED={
   therapist:{name:"",specialty:"Psicología Clínica",cedula:"",address:"",phone:"",email:"",
     payments:[{id:1,label:"CLABE",value:""},{id:2,label:"Mercado Pago",value:""}]},
@@ -858,31 +858,47 @@ function PatientProfile({patient,data,setData,onBack}){
 
       {/* ── PAYMENT SCHEME CARD ──────────────────────────────────────── */}
       {(()=>{
-        const scheme = patient.paymentScheme || "per_session";
-        const schemeColor = {per_session:C.muted, weekly:C.accent, monthly_advance:C.green, monthly_arrears:C.yellow}[scheme];
+        const SCHEMES = ["per_session","weekly","monthly_advance","monthly_arrears"];
+        const SCHEME_INFO = {
+          per_session:     {label:"Por sesión",     sub:"Se cobra al terminar cada sesión",  color:C.muted},
+          weekly:          {label:"Semanal",         sub:"Pago una vez por semana",            color:C.accent},
+          monthly_advance: {label:"Mensual adelantado", sub:"Pago al inicio de cada mes",     color:C.green},
+          monthly_arrears: {label:"Mensual vencido", sub:"Pago al cierre de cada mes",        color:C.yellow},
+        };
+        // Read from live data.patients to always reflect latest saved value
+        const livePatient = data.patients.find(p=>p.id===patient.id)||patient;
+        const scheme = livePatient.paymentScheme || "per_session";
+        const info = SCHEME_INFO[scheme];
+
+        const cycleScheme = () => {
+          const idx = SCHEMES.indexOf(scheme);
+          const next = SCHEMES[(idx+1) % SCHEMES.length];
+          setData(d=>({...d, patients:d.patients.map(p=>p.id===patient.id?{...p,paymentScheme:next}:p)}));
+        };
+
         return (
-          <Card style={{marginBottom:14, borderColor:scheme!=="per_session"?schemeColor+"55":C.border}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              <div>
-                <div style={{fontSize:12,fontWeight:600,color:C.muted,textTransform:"uppercase",letterSpacing:.5,marginBottom:3}}>💳 Esquema de cobro</div>
-                <div style={{fontSize:13,color:C.text}}>
-                  <span style={{color:schemeColor,fontWeight:600}}>{PAY_SCHEME_LABELS[scheme]}</span>
-                </div>
-                {scheme==="monthly_advance"&&<div style={{fontSize:11,color:C.muted,marginTop:2}}>Pago al inicio del mes</div>}
-                {scheme==="monthly_arrears"&&<div style={{fontSize:11,color:C.muted,marginTop:2}}>Pago al final del mes</div>}
-                {scheme==="weekly"&&<div style={{fontSize:11,color:C.muted,marginTop:2}}>Pago cada semana</div>}
-              </div>
-              <button onClick={()=>{
-                  const opts=["per_session","weekly","monthly_advance","monthly_arrears"];
-                  const idx=opts.indexOf(patient.paymentScheme||"per_session");
-                  const next=opts[(idx+1)%opts.length];
-                  setData(d=>({...d,patients:d.patients.map(p=>p.id===patient.id?{...p,paymentScheme:next}:p)}));
-                }}
-                style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,color:C.muted,padding:"6px 12px",fontSize:12,flexShrink:0}}>
-                Cambiar
-              </button>
+          <Card style={{marginBottom:14,borderColor:scheme!=="per_session"?info.color+"55":C.border}}>
+            <div style={{fontSize:11,fontWeight:600,color:C.muted,textTransform:"uppercase",letterSpacing:.5,marginBottom:10}}>💳 Esquema de cobro</div>
+            {/* Option buttons */}
+            <div style={{display:"flex",flexDirection:"column",gap:7}}>
+              {SCHEMES.map(s=>{
+                const si=SCHEME_INFO[s];
+                const isSel=s===scheme;
+                return (
+                  <button key={s} onClick={()=>setData(d=>({...d,patients:d.patients.map(p=>p.id===patient.id?{...p,paymentScheme:s}:p)}))}
+                    style={{display:"flex",alignItems:"center",gap:10,background:isSel?si.color+"18":C.bg,border:`1.5px solid ${isSel?si.color:C.border}`,borderRadius:10,padding:"10px 14px",textAlign:"left",transition:"all .15s",cursor:"pointer"}}>
+                    <div style={{width:16,height:16,borderRadius:"50%",border:`2px solid ${isSel?si.color:C.border}`,background:isSel?si.color:"transparent",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                      {isSel&&<div style={{width:6,height:6,borderRadius:"50%",background:"#fff"}}/>}
+                    </div>
+                    <div style={{flex:1}}>
+                      <div style={{fontSize:13,fontWeight:600,color:isSel?si.color:C.text}}>{si.label}</div>
+                      <div style={{fontSize:11,color:C.muted,marginTop:1}}>{si.sub}</div>
+                    </div>
+                  </button>
+                );
+              })}
             </div>
-            {/* Monthly payment tracker */}
+            {/* Monthly tracker */}
             {(scheme==="monthly_advance"||scheme==="monthly_arrears")&&(()=>{
               const thisMonth=TODAY.slice(0,7);
               const monthPays=pP.filter(p=>p.date.startsWith(thisMonth)&&p.status==="paid");
@@ -892,7 +908,7 @@ function PatientProfile({patient,data,setData,onBack}){
               const balance=monthTotal-expected;
               return (
                 <div style={{marginTop:12,background:C.bg,borderRadius:10,padding:"10px 14px"}}>
-                  <div style={{fontSize:11,color:C.muted,marginBottom:6}}>RESUMEN DEL MES</div>
+                  <div style={{fontSize:11,color:C.muted,marginBottom:6,textTransform:"uppercase",letterSpacing:.4}}>Resumen del mes</div>
                   <div style={{display:"flex",gap:16}}>
                     <div><div style={{fontSize:11,color:C.muted}}>Sesiones</div><div style={{fontSize:16,fontWeight:600,color:C.text}}>{monthSess}</div></div>
                     <div><div style={{fontSize:11,color:C.muted}}>Cobrado</div><div style={{fontSize:16,fontWeight:600,color:C.green}}>${monthTotal.toLocaleString()}</div></div>
@@ -1486,12 +1502,59 @@ function App(){
 
   return (
     <div style={{minHeight:"100vh",background:C.bg,maxWidth:560,margin:"0 auto"}}>
-      <div style={{padding:"14px 16px 12px",borderBottom:`1px solid ${C.border}`,position:"sticky",top:0,background:C.bg,zIndex:50}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-          <div>
-            <h1 style={{fontFamily:"Fraunces",fontSize:22,fontWeight:300,letterSpacing:-.5}}><span style={{fontStyle:"italic",color:C.al}}>Sonia</span></h1>
-            <p style={{fontSize:10,color:C.muted,marginTop:1}}>{data.therapist.name||"Asistente de consultorio"}</p>
+      {/* ── HEADER ── */}
+      <div style={{padding:"22px 16px 16px",borderBottom:`1px solid ${C.border}`,position:"sticky",top:0,background:C.bg,zIndex:50,backgroundImage:`radial-gradient(ellipse at 50% 0%, #1a1f35 0%, ${C.bg} 70%)`}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+          {/* Logo left */}
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
+            <div style={{width:38,height:38,borderRadius:12,background:`linear-gradient(135deg,#1e2235,#2a3050)`,border:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"center",overflow:"hidden",flexShrink:0}}>
+              <svg width="28" height="28" viewBox="0 0 100 100">
+                {/* Calico cat face — black, white, amber */}
+                {/* White base face */}
+                <ellipse cx="50" cy="56" rx="40" ry="36" fill="#f5f5f0"/>
+                {/* Black patch top-left */}
+                <path d="M10 30 Q20 20 38 28 Q30 40 18 46 Z" fill="#1a1a1a"/>
+                {/* Amber patch top-right */}
+                <path d="M62 24 Q78 18 90 34 Q82 46 68 42 Z" fill="#c8860a"/>
+                {/* Left ear */}
+                <polygon points="16,38 8,14 30,28" fill="#1a1a1a"/>
+                <polygon points="18,36 12,18 28,28" fill="#c8607a" opacity=".7"/>
+                {/* Right ear */}
+                <polygon points="84,38 92,14 70,28" fill="#c8860a"/>
+                <polygon points="82,36 88,18 72,28" fill="#e8a0a0" opacity=".7"/>
+                {/* Eyes */}
+                <ellipse cx="35" cy="52" rx="8" ry="9" fill="#1a1a1a"/>
+                <ellipse cx="65" cy="52" rx="8" ry="9" fill="#1a1a1a"/>
+                <ellipse cx="35" cy="52" rx="5" ry="7" fill="#4a9a6a"/>
+                <ellipse cx="65" cy="52" rx="5" ry="7" fill="#c8860a"/>
+                <ellipse cx="37" cy="50" rx="2" ry="3" fill="#111"/>
+                <ellipse cx="67" cy="50" rx="2" ry="3" fill="#111"/>
+                <circle cx="37" cy="49" r="1.2" fill="white"/>
+                <circle cx="67" cy="49" r="1.2" fill="white"/>
+                {/* Amber patch on cheek */}
+                <ellipse cx="68" cy="64" rx="14" ry="10" fill="#c8860a" opacity=".55"/>
+                {/* Nose */}
+                <ellipse cx="50" cy="66" rx="4" ry="2.5" fill="#e88"/>
+                {/* Mouth */}
+                <path d="M50 68.5 Q44 73 40 71" stroke="#aaa" strokeWidth="1.2" fill="none" strokeLinecap="round"/>
+                <path d="M50 68.5 Q56 73 60 71" stroke="#aaa" strokeWidth="1.2" fill="none" strokeLinecap="round"/>
+                {/* Whiskers */}
+                <line x1="10" y1="64" x2="38" y2="67" stroke="#888" strokeWidth=".9" opacity=".7"/>
+                <line x1="10" y1="68" x2="38" y2="69" stroke="#888" strokeWidth=".9" opacity=".7"/>
+                <line x1="10" y1="72" x2="38" y2="71" stroke="#888" strokeWidth=".9" opacity=".7"/>
+                <line x1="90" y1="64" x2="62" y2="67" stroke="#888" strokeWidth=".9" opacity=".7"/>
+                <line x1="90" y1="68" x2="62" y2="69" stroke="#888" strokeWidth=".9" opacity=".7"/>
+                <line x1="90" y1="72" x2="62" y2="71" stroke="#888" strokeWidth=".9" opacity=".7"/>
+              </svg>
+            </div>
+            <div>
+              <div style={{fontFamily:"Fraunces",fontSize:26,fontWeight:300,letterSpacing:-.8,lineHeight:1}}>
+                <span style={{fontStyle:"italic",background:"linear-gradient(90deg,#8facff,#6c8fff)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"}}>Sonia</span>
+              </div>
+              <div style={{fontSize:10,color:C.muted,letterSpacing:.3,marginTop:1}}>{data.therapist.name||"Consultorio"}</div>
+            </div>
           </div>
+          {/* Badges right */}
           <div style={{display:"flex",gap:6,alignItems:"center"}}>
             {todayN>0&&<Badge color={C.accent}>{todayN} hoy</Badge>}
             {pendN>0&&<Badge color={C.yellow}>${data.payments.filter(p=>p.status==="pending").reduce((s,p)=>s+p.amount,0).toLocaleString()}</Badge>}
