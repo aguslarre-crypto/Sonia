@@ -53,17 +53,189 @@ const DEFAULT_FEE = 2000;
 const TODAY = new Date().toISOString().split("T")[0];
 function addDays(s,n){const d=new Date(s+"T12:00:00");d.setDate(d.getDate()+n);return d.toISOString().split("T")[0];}
 
+// Day/time helpers
+const WDAYS = ["Dom","Lun","Mar","Mié","Jue","Vie","Sáb"];
+const WDAYS_FULL = ["Domingo","Lunes","Martes","Miércoles","Jueves","Viernes","Sábado"];
+
+// Payment scheme labels
+const PAY_SCHEME_LABELS = {
+  per_session:      "Por sesión",
+  weekly:           "Semanal",
+  monthly_advance:  "Mensual adelantado",
+  monthly_arrears:  "Mensual vencido",
+};
+
+// ── NOTIFICATION ENGINE ───────────────────────────────────────────────────────
+// Requests permission once, then schedules "did session happen + was it paid?"
+// checks 1 hour after each confirmed appointment time.
+function useNotifications(data, setData){
+  const permRef = useRef(false);
+
+  const requestPerm = useCallback(async()=>{
+    if(!('Notification' in window))return false;
+    if(Notification.permission==="granted"){permRef.current=true;return true;}
+    if(Notification.permission==="denied")return false;
+    const r = await Notification.requestPermission();
+    permRef.current = r==="granted";
+    return permRef.current;
+  },[]);
+
+  // Show an in-app confirmation prompt (notifications can't show buttons on Android)
+  const [prompt, setPrompt] = useState(null); // {apptId, patientName, time, date}
+
+  // Check every minute if any appointment ended ~1 hour ago and still "confirmed"
+  useEffect(()=>{
+    const check=()=>{
+      const now = new Date();
+      const todayStr = now.toISOString().split("T")[0];
+      const nowMins = now.getHours()*60 + now.getMinutes();
+
+      const candidates = data.appointments.filter(a=>{
+        if(a.date!==todayStr) return false;
+        if(a.status!=="confirmed") return false;
+        if(a._prompted) return false; // already asked
+        const [hh,mm] = a.time.split(":").map(Number);
+        const endMins = hh*60 + mm + 50; // 50-min session
+        const diff = nowMins - endMins;
+        return diff >= 5 && diff <= 90; // between 5 and 90 minutes after end
+      });
+
+      if(candidates.length>0 && !prompt){
+        const a = candidates[0];
+        setPrompt(a);
+        // Also fire a native notification if permitted
+        if(Notification.permission==="granted"){
+          try{
+            new Notification("Sonia — Confirmar sesión", {
+              body: `¿Se realizó la sesión de ${a.patientName}? Abre Sonia para confirmar.`,
+              icon: "./icon-192.png",
+              tag: `session-${a.id}`,
+            });
+          }catch{}
+        }
+      }
+    };
+    const t = setInterval(check, 60_000);
+    check(); // run immediately on mount
+    return ()=>clearInterval(t);
+  },[data.appointments, prompt]);
+
+  const resolvePrompt = useCallback((apptId, sessionDone, paymentDone, fee)=>{
+    setData(d=>{
+      let appts = d.appointments.map(a=>{
+        if(a.id!==apptId) return a;
+        return {...a, status: sessionDone?"done":"cancelled", _prompted:true};
+      });
+      let pays = d.payments;
+      if(sessionDone && paymentDone){
+        const appt = d.appointments.find(a=>a.id===apptId);
+        if(appt){
+          pays = [...pays, {id:Date.now(), patientId:appt.patientId, patientName:appt.patientName,
+            date:TODAY, amount:fee||DEFAULT_FEE, method:"efectivo", concept:`Sesión ${appt.time}`, status:"paid"}];
+        }
+      }
+      return {...d, appointments:appts, payments:pays};
+    });
+    setPrompt(null);
+  },[setData]);
+
+  const dismissPrompt = useCallback((apptId)=>{
+    // Mark as prompted so we don't ask again, but don't change status
+    setData(d=>({...d, appointments:d.appointments.map(a=>a.id===apptId?{...a,_prompted:true}:a)}));
+    setPrompt(null);
+  },[setData]);
+
+  return {requestPerm, prompt, resolvePrompt, dismissPrompt};
+}
+
+// ── SESSION CONFIRM PROMPT ────────────────────────────────────────────────────
+function SessionPrompt({appt, patients, onResolve, onDismiss}){
+  const patient = patients.find(p=>p.id===appt.patientId);
+  const fee = appt.fee || DEFAULT_FEE;
+  const [paid, setPaid] = useState(true);
+
+  return (
+    <div className="ov" onClick={()=>onDismiss(appt.id)}>
+      <div className="sh" onClick={e=>e.stopPropagation()} style={{paddingBottom:32}}>
+        <div className="hdl"/>
+        <div style={{textAlign:"center",marginBottom:20}}>
+          <div style={{fontSize:32,marginBottom:8}}>🔔</div>
+          <div style={{fontFamily:"Fraunces",fontSize:18,fontWeight:400,marginBottom:4}}>¿Cómo salió la sesión?</div>
+          <div style={{fontSize:13,color:C.muted}}>{appt.patientName} · {appt.time}</div>
+        </div>
+
+        <div style={{display:"flex",gap:10,marginBottom:20}}>
+          <button onClick={()=>{
+              // session happened — ask about payment
+              const payRow = (
+                <div style={{marginBottom:20}}>
+                  <div style={{fontSize:13,color:C.text,marginBottom:12,textAlign:"center"}}>¿Se cobró la sesión?</div>
+                  <div style={{display:"flex",gap:8,alignItems:"center",justifyContent:"center",marginBottom:4}}>
+                    <button onClick={()=>onResolve(appt.id,true,true,fee)}
+                      style={{flex:1,background:C.green+"22",border:`1px solid ${C.green}44`,borderRadius:10,padding:"12px 0",color:C.green,fontSize:13,fontWeight:600}}>
+                      ✓ Sí, cobré ${fee.toLocaleString()}
+                    </button>
+                    <button onClick={()=>onResolve(appt.id,true,false,fee)}
+                      style={{flex:1,background:C.yellow+"22",border:`1px solid ${C.yellow}44`,borderRadius:10,padding:"12px 0",color:C.yellow,fontSize:13,fontWeight:600}}>
+                      Pendiente
+                    </button>
+                  </div>
+                </div>
+              );
+              // Replace content — we'll use a trick: just call resolve with sessionDone=true
+              // and ask payment in the same action via a second step rendered inline
+              // For simplicity: open a quick inline toggle
+              document.getElementById('sp-step2').style.display='block';
+              document.getElementById('sp-step1').style.display='none';
+            }}
+            style={{flex:1,background:C.green+"22",border:`1px solid ${C.green}44`,borderRadius:12,padding:"16px 0",color:C.green,fontSize:14,fontWeight:600}}>
+            ✓ Sí se realizó
+          </button>
+          <button onClick={()=>onResolve(appt.id,false,false,fee)}
+            style={{flex:1,background:C.red+"22",border:`1px solid ${C.red}44`,borderRadius:12,padding:"16px 0",color:C.red,fontSize:14,fontWeight:600}}>
+            ✗ No se realizó
+          </button>
+        </div>
+
+        <div id="sp-step1" style={{textAlign:"center"}}>
+          <button onClick={()=>onDismiss(appt.id)} style={{background:"none",color:C.muted,fontSize:12,padding:"8px 0"}}>
+            Preguntar después
+          </button>
+        </div>
+
+        <div id="sp-step2" style={{display:"none"}}>
+          <div style={{fontSize:13,color:C.text,marginBottom:12,textAlign:"center",fontWeight:600}}>¿Se cobró la sesión?</div>
+          <div style={{display:"flex",gap:8,marginBottom:12}}>
+            <button onClick={()=>onResolve(appt.id,true,true,fee)}
+              style={{flex:1,background:C.green+"22",border:`1px solid ${C.green}44`,borderRadius:10,padding:"13px 0",color:C.green,fontSize:13,fontWeight:600}}>
+              💵 Sí, ${fee.toLocaleString()}
+            </button>
+            <button onClick={()=>onResolve(appt.id,true,false,fee)}
+              style={{flex:1,background:C.yellow+"22",border:`1px solid ${C.yellow}44`,borderRadius:10,padding:"13px 0",color:C.yellow,fontSize:13,fontWeight:600}}>
+              ⏳ Queda pendiente
+            </button>
+          </div>
+          <button onClick={()=>onDismiss(appt.id)} style={{background:"none",color:C.muted,fontSize:12,padding:"4px 0",display:"block",margin:"0 auto"}}>
+            Preguntar después
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 const C={bg:"#0f1117",surface:"#181c27",card:"#1e2235",border:"#2a3050",
   accent:"#6c8fff",al:"#8facff",green:"#4ecb8b",yellow:"#f5c842",red:"#ff6b6b",text:"#e8eaf6",muted:"#7b83a6"};
 
 // ── STORAGE ──────────────────────────────────────────────────────────────────
-const SK="sonia_v5";
+const SK="sonia_v6";
 const SEED={
   therapist:{name:"",specialty:"Psicología Clínica",cedula:"",address:"",phone:"",email:"",
     payments:[{id:1,label:"CLABE",value:""},{id:2,label:"Mercado Pago",value:""}]},
   patients:[],appointments:[],payments:[],notes:[],
   apiKey:"",
-  // patients now carry: frequency ("weekly"|"biweekly"|"none"), preferredDay (0-6), preferredTime ("HH:00")
+  // patients carry: frequency("weekly"|"biweekly"|"none"), preferredDay(0-6), preferredTime("HH:00")
+  // patients carry: paymentScheme("per_session"|"weekly"|"monthly_advance"|"monthly_arrears")
 };
 const loadData=()=>{try{const d=localStorage.getItem(SK);return d?{...SEED,...JSON.parse(d)}:SEED;}catch{return SEED;}};
 const saveData=d=>{try{localStorage.setItem(SK,JSON.stringify(d));}catch{}};
@@ -684,6 +856,55 @@ function PatientProfile({patient,data,setData,onBack}){
         )}
       </Card>
 
+      {/* ── PAYMENT SCHEME CARD ──────────────────────────────────────── */}
+      {(()=>{
+        const scheme = patient.paymentScheme || "per_session";
+        const schemeColor = {per_session:C.muted, weekly:C.accent, monthly_advance:C.green, monthly_arrears:C.yellow}[scheme];
+        return (
+          <Card style={{marginBottom:14, borderColor:scheme!=="per_session"?schemeColor+"55":C.border}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div>
+                <div style={{fontSize:12,fontWeight:600,color:C.muted,textTransform:"uppercase",letterSpacing:.5,marginBottom:3}}>💳 Esquema de cobro</div>
+                <div style={{fontSize:13,color:C.text}}>
+                  <span style={{color:schemeColor,fontWeight:600}}>{PAY_SCHEME_LABELS[scheme]}</span>
+                </div>
+                {scheme==="monthly_advance"&&<div style={{fontSize:11,color:C.muted,marginTop:2}}>Pago al inicio del mes</div>}
+                {scheme==="monthly_arrears"&&<div style={{fontSize:11,color:C.muted,marginTop:2}}>Pago al final del mes</div>}
+                {scheme==="weekly"&&<div style={{fontSize:11,color:C.muted,marginTop:2}}>Pago cada semana</div>}
+              </div>
+              <button onClick={()=>{
+                  const opts=["per_session","weekly","monthly_advance","monthly_arrears"];
+                  const idx=opts.indexOf(patient.paymentScheme||"per_session");
+                  const next=opts[(idx+1)%opts.length];
+                  setData(d=>({...d,patients:d.patients.map(p=>p.id===patient.id?{...p,paymentScheme:next}:p)}));
+                }}
+                style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,color:C.muted,padding:"6px 12px",fontSize:12,flexShrink:0}}>
+                Cambiar
+              </button>
+            </div>
+            {/* Monthly payment tracker */}
+            {(scheme==="monthly_advance"||scheme==="monthly_arrears")&&(()=>{
+              const thisMonth=TODAY.slice(0,7);
+              const monthPays=pP.filter(p=>p.date.startsWith(thisMonth)&&p.status==="paid");
+              const monthSess=pA.filter(a=>a.date.startsWith(thisMonth)&&a.status==="done").length;
+              const monthTotal=monthPays.reduce((s,p)=>s+p.amount,0);
+              const expected=monthSess*DEFAULT_FEE;
+              const balance=monthTotal-expected;
+              return (
+                <div style={{marginTop:12,background:C.bg,borderRadius:10,padding:"10px 14px"}}>
+                  <div style={{fontSize:11,color:C.muted,marginBottom:6}}>RESUMEN DEL MES</div>
+                  <div style={{display:"flex",gap:16}}>
+                    <div><div style={{fontSize:11,color:C.muted}}>Sesiones</div><div style={{fontSize:16,fontWeight:600,color:C.text}}>{monthSess}</div></div>
+                    <div><div style={{fontSize:11,color:C.muted}}>Cobrado</div><div style={{fontSize:16,fontWeight:600,color:C.green}}>${monthTotal.toLocaleString()}</div></div>
+                    <div><div style={{fontSize:11,color:C.muted}}>Balance</div><div style={{fontSize:16,fontWeight:600,color:balance>=0?C.green:C.red}}>{balance>=0?"+":""}{balance.toLocaleString()}</div></div>
+                  </div>
+                </div>
+              );
+            })()}
+          </Card>
+        );
+      })()}
+
       {/* Tabs */}
       <div style={{display:"flex",gap:6,marginBottom:12,overflowX:"auto",paddingBottom:4}}>
         {tabs.map(t=><button key={t.id} className="pill" onClick={()=>setT(t.id)} style={{background:tab===t.id?C.accent:"transparent",color:tab===t.id?"#fff":C.muted,borderColor:tab===t.id?C.accent:C.border}}>{t.l}</button>)}
@@ -916,57 +1137,167 @@ function Pacientes({data,setData}){
 function Agenda({data,setData,slotDays,setSlotDays}){
   const {appointments,patients}=data;
   const [modal,setModal]=useState(false);
-  const [selDate,setSelDate]=useState(TODAY);
   const [form,setForm]=useState({patientId:"",date:TODAY,time:"09:00",fee:String(DEFAULT_FEE),status:"confirmed"});
+  const [viewMode,setViewMode]=useState("week"); // "week" | "day"
+  const [selDate,setSelDate]=useState(TODAY);
 
-  const dayAppts=appointments.filter(a=>a.date===selDate).sort((a,b)=>a.time.localeCompare(b.time));
-  const add=()=>{const p=patients.find(p=>p.id===parseInt(form.patientId));if(!p)return;setData(d=>({...d,appointments:[...d.appointments,{id:Date.now(),patientId:p.id,patientName:p.name,date:form.date,time:form.time,duration:50,status:form.status,fee:parseInt(form.fee)||DEFAULT_FEE}]}));setModal(false);setSelDate(form.date);};
+  // Compute the Monday of the week containing selDate
+  const getWeekStart=useCallback(d=>{
+    const base=new Date(d+"T12:00:00");
+    const dow=base.getDay(); // 0=Sun
+    const diff=dow===0?-6:1-dow; // go back to Monday
+    base.setDate(base.getDate()+diff);
+    return base.toISOString().split("T")[0];
+  },[]);
+
+  const [weekStart,setWeekStart]=useState(()=>getWeekStart(TODAY));
+
+  // 5 weekdays Mon–Fri
+  const weekDays=useMemo(()=>
+    Array.from({length:5},(_,i)=>addDays(weekStart,i))
+  ,[weekStart]);
+
+  const prevWeek=()=>setWeekStart(d=>addDays(d,-7));
+  const nextWeek=()=>setWeekStart(d=>addDays(d,7));
+  const goToday=()=>{const ws=getWeekStart(TODAY);setWeekStart(ws);setSelDate(TODAY);};
+
+  const add=()=>{
+    const p=patients.find(p=>p.id===parseInt(form.patientId));if(!p)return;
+    setData(d=>({...d,appointments:[...d.appointments,{id:Date.now(),patientId:p.id,patientName:p.name,date:form.date,time:form.time,duration:50,status:form.status,fee:parseInt(form.fee)||DEFAULT_FEE}]}));
+    setModal(false);
+    setWeekStart(getWeekStart(form.date));
+  };
+
   const bookSlot=(date,time)=>{setForm(f=>({...f,date,time}));setModal(true);};
   const toggle=id=>setData(d=>({...d,appointments:d.appointments.map(a=>a.id===id?{...a,status:a.status==="confirmed"?"done":a.status==="done"?"cancelled":"confirmed"}:a)}));
+
   const SC={confirmed:C.accent,done:C.green,pending:C.yellow,cancelled:C.muted};
   const SL={confirmed:"Confirmada",done:"Realizada",pending:"Pendiente",cancelled:"Cancelada"};
-  const getWeek=()=>{const base=new Date(selDate+"T12:00:00"),day=base.getDay();return Array.from({length:7},(_,i)=>{const d=new Date(base);d.setDate(base.getDate()-day+i);return d.toISOString().split("T")[0];});};
-  const WD=["D","L","M","X","J","V","S"],week=getWeek();
+  const SC_BG={confirmed:C.accent+"22",done:C.green+"22",pending:C.yellow+"22",cancelled:C.muted+"11"};
+
+  // Get appointment at a specific date+time
+  const apptAt=(date,time)=>appointments.filter(a=>a.date===date&&a.time===time&&a.status!=="cancelled");
+
+  // Month/week label
+  const weekLabel=useMemo(()=>{
+    const s=new Date(weekStart+"T12:00:00");
+    const e=new Date(weekDays[4]+"T12:00:00");
+    const months=["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"];
+    if(s.getMonth()===e.getMonth()) return `${months[s.getMonth()]} ${s.getFullYear()}`;
+    return `${months[s.getMonth()]}–${months[e.getMonth()]} ${e.getFullYear()}`;
+  },[weekStart,weekDays]);
+
+  const todayInWeek=weekDays.includes(TODAY);
+  const COL_W = 52; // px per day column
 
   return (
     <div className="fi">
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
-        <div><h2 style={{fontFamily:"Fraunces",fontSize:22,fontWeight:400}}>Agenda</h2><p style={{color:C.muted,fontSize:13}}>{dayAppts.length} cita{dayAppts.length!==1?"s":""}</p></div>
-        <Btn small onClick={()=>{setForm(f=>({...f,date:selDate}));setModal(true);}}>+ Cita</Btn>
+      {/* Header */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+        <div>
+          <h2 style={{fontFamily:"Fraunces",fontSize:22,fontWeight:400}}>Agenda</h2>
+          <div style={{fontSize:12,color:C.muted,marginTop:1}}>{weekLabel}</div>
+        </div>
+        <div style={{display:"flex",gap:6}}>
+          {!todayInWeek&&<button onClick={goToday} style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,color:C.muted,fontSize:11,padding:"5px 10px"}}>Hoy</button>}
+          <button onClick={prevWeek} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,color:C.muted,fontSize:14,padding:"5px 10px"}}>‹</button>
+          <button onClick={nextWeek} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,color:C.muted,fontSize:14,padding:"5px 10px"}}>›</button>
+          <Btn small onClick={()=>{setForm(f=>({...f,date:selDate}));setModal(true);}}>+ Cita</Btn>
+        </div>
       </div>
+
+      {/* Free slots */}
       <FreeSlots appointments={appointments} onBook={bookSlot} days={slotDays} setDays={setSlotDays}/>
-      <div style={{display:"flex",gap:6,marginBottom:16,overflowX:"auto",paddingBottom:4}}>
-        {week.map((d,i)=>{const has=appointments.some(a=>a.date===d&&a.status!=="cancelled"),isSel=d===selDate;return(
-          <button key={d} onClick={()=>setSelDate(d)} style={{minWidth:48,padding:"8px 0",borderRadius:10,border:"none",background:isSel?C.accent:C.card,color:isSel?"#fff":C.muted,display:"flex",flexDirection:"column",alignItems:"center",gap:3,transition:"all .15s"}}>
-            <span style={{fontSize:9,fontWeight:500}}>{WD[i]}</span>
-            <span style={{fontSize:15,fontWeight:600}}>{new Date(d+"T12:00:00").getDate()}</span>
-            {has&&<div style={{width:4,height:4,borderRadius:"50%",background:isSel?"rgba(255,255,255,.7)":C.accent}}/>}
-          </button>
-        );})}
+
+      {/* ── WEEKLY GRID ─────────────────────────────────────────────── */}
+      <div style={{overflowX:"auto",overflowY:"visible",WebkitOverflowScrolling:"touch",marginLeft:-14,marginRight:-14,paddingLeft:14}}>
+        <div style={{minWidth:340}}>
+          {/* Day header row */}
+          <div style={{display:"flex",marginBottom:2,paddingLeft:36}}>
+            {weekDays.map(d=>{
+              const dow=new Date(d+"T12:00:00").getDay();
+              const dayNum=new Date(d+"T12:00:00").getDate();
+              const isToday=d===TODAY;
+              const hasCita=appointments.some(a=>a.date===d&&a.status!=="cancelled");
+              return (
+                <div key={d} style={{width:COL_W,flexShrink:0,textAlign:"center",padding:"6px 2px"}}>
+                  <div style={{fontSize:10,color:C.muted,fontWeight:500,marginBottom:3}}>{WDAYS[dow]}</div>
+                  <div style={{width:28,height:28,borderRadius:"50%",background:isToday?C.accent:"transparent",color:isToday?"#fff":C.text,fontSize:13,fontWeight:isToday?700:500,display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto"}}>
+                    {dayNum}
+                  </div>
+                  {hasCita&&<div style={{width:4,height:4,borderRadius:"50%",background:isToday?C.al:C.accent,margin:"3px auto 0"}}/>}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Time rows */}
+          <div style={{position:"relative"}}>
+            {WORK_HOURS.map(hour=>{
+              const [hh]=hour.split(":").map(Number);
+              const isCurrentHour=(()=>{const n=new Date();return n.toISOString().split("T")[0]===TODAY&&n.getHours()===hh;})();
+              return (
+                <div key={hour} style={{display:"flex",minHeight:52,borderTop:`1px solid ${C.border}22`,position:"relative"}}>
+                  {/* Time label */}
+                  <div style={{width:36,flexShrink:0,paddingTop:4,fontSize:10,color:isCurrentHour?C.accent:C.muted,fontWeight:isCurrentHour?600:400,textAlign:"right",paddingRight:6}}>
+                    {hour}
+                  </div>
+                  {/* Day columns */}
+                  {weekDays.map(d=>{
+                    const appts=apptAt(d,hour);
+                    const isEmpty=appts.length===0;
+                    return (
+                      <div key={d} style={{width:COL_W,flexShrink:0,padding:"2px 3px",borderLeft:`1px solid ${C.border}22`,position:"relative",minHeight:52}}>
+                        {isEmpty?(
+                          // Empty slot — tap to add
+                          <button onClick={()=>bookSlot(d,hour)} style={{width:"100%",height:46,borderRadius:6,background:"transparent",border:"none",cursor:"pointer",opacity:0}}
+                            aria-label={`Agendar ${d} ${hour}`}/>
+                        ):(
+                          appts.map(a=>(
+                            <div key={a.id} onClick={()=>toggle(a.id)}
+                              style={{background:SC_BG[a.status],border:`1px solid ${SC[a.status]}55`,borderRadius:6,padding:"3px 5px",cursor:"pointer",marginBottom:2,minHeight:42}}>
+                              <div style={{fontSize:10,color:SC[a.status],fontWeight:700,lineHeight:1.2,marginBottom:1}}>{a.time}</div>
+                              <div style={{fontSize:10,color:C.text,lineHeight:1.2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:COL_W-12}}>
+                                {a.patientName.split(" ")[0]}
+                              </div>
+                              <div style={{fontSize:9,color:C.muted,marginTop:1}}>{SL[a.status].slice(0,4)}</div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })}
+          </div>
+        </div>
       </div>
-      <div style={{display:"flex",flexDirection:"column",gap:10}}>
-        {dayAppts.length===0?<Card style={{textAlign:"center",padding:36}}><div style={{fontSize:32,marginBottom:8}}>📅</div><div style={{color:C.muted}}>Sin citas este día</div></Card>
-        :dayAppts.map(a=>(
-          <Card key={a.id} style={{display:"flex",alignItems:"center",gap:14,padding:"12px 14px"}}>
-            <div style={{textAlign:"center",minWidth:44}}><div style={{fontSize:14,fontWeight:600,color:C.al}}>{a.time}</div><div style={{fontSize:10,color:C.muted}}>50 min</div></div>
-            <div style={{flex:1}}><div style={{fontWeight:500,fontSize:14}}>{a.patientName}</div><div style={{fontSize:12,color:C.muted}}>${a.fee.toLocaleString()} pesos</div></div>
-            <div style={{display:"flex",alignItems:"center",gap:8}}>
-              <Badge color={SC[a.status]}>{SL[a.status]}</Badge>
-              <button onClick={()=>toggle(a.id)} style={{background:"transparent",border:`1px solid ${C.border}`,borderRadius:6,padding:"4px 8px",color:C.muted,fontSize:11}}>→</button>
-            </div>
-          </Card>
-        ))}
+
+      {/* Tap-to-book hint */}
+      <div style={{fontSize:11,color:C.muted,textAlign:"center",marginTop:10,marginBottom:4}}>
+        Toca una celda vacía para agendar · Toca una cita para cambiar estado
       </div>
+
+      {/* New appointment modal */}
       {modal&&(
         <Sheet onClose={()=>setModal(false)} title="Nueva Cita">
           <div style={{display:"flex",flexDirection:"column",gap:14}}>
-            {patients.length===0?<div style={{textAlign:"center",padding:20,color:C.muted,fontSize:13}}>Primero agrega pacientes en la sección Pacientes 👤</div>:(
+            {patients.length===0?(
+              <div style={{textAlign:"center",padding:20,color:C.muted,fontSize:13}}>Primero agrega pacientes en la sección Pacientes 👤</div>
+            ):(
               <>
                 <Fld label="Paciente" value={form.patientId} onChange={v=>setForm(f=>({...f,patientId:v}))} options={[{v:"",l:"Seleccionar..."}, ...patients.map(p=>({v:p.id,l:p.name}))]}/>
-                <div style={{display:"flex",gap:10}}><div style={{flex:1}}><Fld label="Fecha" type="date" value={form.date} onChange={v=>setForm(f=>({...f,date:v}))}/></div><div style={{width:110}}><Fld label="Hora" type="time" value={form.time} onChange={v=>setForm(f=>({...f,time:v}))}/></div></div>
+                <div style={{display:"flex",gap:10}}>
+                  <div style={{flex:1}}><Fld label="Fecha" type="date" value={form.date} onChange={v=>setForm(f=>({...f,date:v}))}/></div>
+                  <div style={{width:110}}><Fld label="Hora" type="time" value={form.time} onChange={v=>setForm(f=>({...f,time:v}))}/></div>
+                </div>
                 <Fld label="Honorario (pesos)" type="number" value={form.fee} onChange={v=>setForm(f=>({...f,fee:v}))} placeholder={String(DEFAULT_FEE)}/>
                 <Fld label="Estado" value={form.status} onChange={v=>setForm(f=>({...f,status:v}))} options={[{v:"confirmed",l:"Confirmada"},{v:"pending",l:"Pendiente"}]}/>
-                <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}><Btn variant="ghost" onClick={()=>setModal(false)}>Cancelar</Btn><Btn onClick={add} disabled={!form.patientId}>Guardar</Btn></div>
+                <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+                  <Btn variant="ghost" onClick={()=>setModal(false)}>Cancelar</Btn>
+                  <Btn onClick={add} disabled={!form.patientId}>Guardar</Btn>
+                </div>
               </>
             )}
           </div>
@@ -1144,6 +1475,11 @@ function App(){
   useEffect(()=>{dataRef.current=data;},[data]);
   useEffect(()=>saveData(data),[data]);
 
+  const {requestPerm, prompt, resolvePrompt, dismissPrompt} = useNotifications(data, setData);
+
+  // Request notification permission on first load
+  useEffect(()=>{ requestPerm(); },[]);
+
   const tabs=[{id:"pacientes",l:"Pacientes",icon:"👤"},{id:"agenda",l:"Agenda",icon:"📅"},{id:"pagos",l:"Pagos",icon:"💳"},{id:"chat",l:"Asistente",icon:"🌿"},{id:"perfil",l:"Perfil",icon:"🪪"}];
   const pendN=data.payments.filter(p=>p.status==="pending").length;
   const todayN=data.appointments.filter(a=>a.date===TODAY).length;
@@ -1179,6 +1515,16 @@ function App(){
         ))}
       </div>
       {tab!=="chat"&&<MicButton dataRef={dataRef} setData={setData} setTab={setTab} setSlotDays={setSlotDays}/>}
+
+      {/* Session confirmation prompt — appears ~1hr after appointment ends */}
+      {prompt&&(
+        <SessionPrompt
+          appt={prompt}
+          patients={data.patients}
+          onResolve={resolvePrompt}
+          onDismiss={dismissPrompt}
+        />
+      )}
     </div>
   );
 }
