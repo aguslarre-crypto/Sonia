@@ -79,10 +79,9 @@ const DEFAULT_DAY_SCHEDULE = {0:[],1:[],2:[],3:[],4:[],5:[],6:[]};
 
 
 // ── NOTIFICATION ENGINE ───────────────────────────────────────────────────────
-// Requests permission once, then schedules "did session happen + was it paid?"
-// checks 1 hour after each confirmed appointment time.
 function useNotifications(data, setData){
   const permRef = useRef(false);
+  const morningTimerRef = useRef(null);
 
   const requestPerm = useCallback(async()=>{
     if(!('Notification' in window))return false;
@@ -93,72 +92,113 @@ function useNotifications(data, setData){
     return permRef.current;
   },[]);
 
-  // Show an in-app confirmation prompt (notifications can't show buttons on Android)
-  const [prompt, setPrompt] = useState(null); // {apptId, patientName, time, date}
+  const [prompt, setPrompt] = useState(null);
 
-  // Check every minute if any appointment ended ~1 hour ago and still "confirmed"
+  // ── 6am daily briefing ─────────────────────────────────────────────────────
+  useEffect(()=>{
+    const scheduleMorning=()=>{
+      if(morningTimerRef.current) clearTimeout(morningTimerRef.current);
+      const now=new Date();
+      const next6=new Date(now);
+      next6.setHours(6,0,0,0);
+      if(next6<=now) next6.setDate(next6.getDate()+1);
+      const ms=next6-now;
+
+      morningTimerRef.current=setTimeout(()=>{
+        if(Notification.permission==="granted"){
+          const todayStr=getToday();
+          const todayAppts=data.appointments
+            .filter(a=>a.date===todayStr&&a.status!=="cancelled")
+            .sort((a,b)=>a.time.localeCompare(b.time));
+
+          // Patients with no upcoming appointment at all
+          const patientsWithFuture=new Set(data.appointments
+            .filter(a=>a.date>=todayStr&&a.status!=="cancelled")
+            .map(a=>a.patientId));
+          const sinHora=data.patients.filter(p=>!patientsWithFuture.has(p.id));
+
+          let body="";
+          if(todayAppts.length>0){
+            body+="Hoy: "+todayAppts.map(a=>`${a.time} ${a.patientName}`).join(", ")+".";
+          } else {
+            body+="Sin citas hoy.";
+          }
+          if(sinHora.length>0){
+            body+=` Sin hora: ${sinHora.map(p=>p.name.split(" ")[0]).join(", ")}.`;
+          }
+
+          try{
+            new Notification("🌿 Sonia — Agenda del día", {
+              body,
+              icon:"./icon-192.png",
+              tag:"morning-brief",
+            });
+          }catch{}
+        }
+        scheduleMorning(); // reschedule for tomorrow
+      }, ms);
+    };
+    scheduleMorning();
+    return ()=>{ if(morningTimerRef.current) clearTimeout(morningTimerRef.current); };
+  },[data.appointments, data.patients]);
+
+  // ── Post-session confirmation check (every minute) ──────────────────────────
   useEffect(()=>{
     const check=()=>{
-      const now = new Date();
-      const todayStr = now.toISOString().split("T")[0];
-      const nowMins = now.getHours()*60 + now.getMinutes();
-
-      const candidates = data.appointments.filter(a=>{
-        if(a.date!==todayStr) return false;
-        if(a.status!=="confirmed") return false;
-        if(a._prompted) return false; // already asked
-        const [hh,mm] = a.time.split(":").map(Number);
-        const endMins = hh*60 + mm + 50; // 50-min session
-        const diff = nowMins - endMins;
-        return diff >= 5 && diff <= 90; // between 5 and 90 minutes after end
+      const now=new Date();
+      const todayStr=now.toISOString().split("T")[0];
+      const nowMins=now.getHours()*60+now.getMinutes();
+      const candidates=data.appointments.filter(a=>{
+        if(a.date!==todayStr||a.status!=="confirmed"||a._prompted)return false;
+        const [hh,mm]=a.time.split(":").map(Number);
+        const endMins=hh*60+mm+50;
+        const diff=nowMins-endMins;
+        return diff>=5&&diff<=90;
       });
-
-      if(candidates.length>0 && !prompt){
-        const a = candidates[0];
+      if(candidates.length>0&&!prompt){
+        const a=candidates[0];
         setPrompt(a);
-        // Also fire a native notification if permitted
         if(Notification.permission==="granted"){
           try{
-            new Notification("Sonia — Confirmar sesión", {
-              body: `¿Se realizó la sesión de ${a.patientName}? Abre Sonia para confirmar.`,
-              icon: "./icon-192.png",
-              tag: `session-${a.id}`,
+            new Notification("Sonia — Confirmar sesión",{
+              body:`¿Se realizó la sesión de ${a.patientName}? Abre Sonia para confirmar.`,
+              icon:"./icon-192.png",
+              tag:`session-${a.id}`,
             });
           }catch{}
         }
       }
     };
-    const t = setInterval(check, 60_000);
-    check(); // run immediately on mount
-    return ()=>clearInterval(t);
-  },[data.appointments, prompt]);
+    const t=setInterval(check,60_000);
+    check();
+    return()=>clearInterval(t);
+  },[data.appointments,prompt]);
 
-  const resolvePrompt = useCallback((apptId, sessionDone, paymentDone, fee)=>{
+  const resolvePrompt=useCallback((apptId,sessionDone,paymentDone,fee)=>{
     setData(d=>{
-      let appts = d.appointments.map(a=>{
-        if(a.id!==apptId) return a;
-        return {...a, status: sessionDone?"done":"cancelled", _prompted:true};
+      let appts=d.appointments.map(a=>{
+        if(a.id!==apptId)return a;
+        return{...a,status:sessionDone?"done":"cancelled",_prompted:true};
       });
-      let pays = d.payments;
-      if(sessionDone && paymentDone){
-        const appt = d.appointments.find(a=>a.id===apptId);
+      let pays=d.payments;
+      if(sessionDone&&paymentDone){
+        const appt=d.appointments.find(a=>a.id===apptId);
         if(appt){
-          pays = [...pays, {id:Date.now(), patientId:appt.patientId, patientName:appt.patientName,
-            date:TODAY, amount:fee||DEFAULT_FEE, method:"efectivo", concept:`Sesión ${appt.time}`, status:"paid"}];
+          pays=[...pays,{id:Date.now(),patientId:appt.patientId,patientName:appt.patientName,
+            date:getToday(),amount:fee||DEFAULT_FEE,method:"efectivo",concept:`Sesión ${appt.time}`,status:"paid"}];
         }
       }
-      return {...d, appointments:appts, payments:pays};
+      return{...d,appointments:appts,payments:pays};
     });
     setPrompt(null);
   },[setData]);
 
-  const dismissPrompt = useCallback((apptId)=>{
-    // Mark as prompted so we don't ask again, but don't change status
-    setData(d=>({...d, appointments:d.appointments.map(a=>a.id===apptId?{...a,_prompted:true}:a)}));
+  const dismissPrompt=useCallback((apptId)=>{
+    setData(d=>({...d,appointments:d.appointments.map(a=>a.id===apptId?{...a,_prompted:true}:a)}));
     setPrompt(null);
   },[setData]);
 
-  return {requestPerm, prompt, resolvePrompt, dismissPrompt};
+  return{requestPerm,prompt,resolvePrompt,dismissPrompt};
 }
 
 // ── SESSION CONFIRM PROMPT ────────────────────────────────────────────────────
@@ -241,7 +281,7 @@ const C={bg:"#0f1117",surface:"#181c27",card:"#1e2235",border:"#2a3050",
   accent:"#6c8fff",al:"#8facff",green:"#4ecb8b",yellow:"#f5c842",red:"#ff6b6b",text:"#e8eaf6",muted:"#7b83a6"};
 
 // ── STORAGE ──────────────────────────────────────────────────────────────────
-const SK="sonia_v10";
+const SK="sonia_v11";
 const SEED={
   therapist:{name:"",specialty:"Psicología Clínica",cedula:"",address:"",phone:"",email:"",
     payments:[{id:1,label:"CLABE",value:""},{id:2,label:"Mercado Pago",value:""}]},
@@ -537,11 +577,36 @@ function FreeSlots({appointments,onBook,days,setDays,daySchedule}){
       const ds=base.toISOString().split("T")[0];
       const dow=base.getDay();
       if(dow===0||dow===6)continue;
-      const booked=new Set(appointments.filter(a=>a.date===ds&&a.status!=="cancelled").map(a=>a.time));
-      // Only show :00 slots in the free slots list (cleaner)
-      const free=WORK_SLOTS.filter(h=>h.endsWith(":00")&&!booked.has(h)&&!isBlocked(ds,h));
-      const busyCount=booked.size;
-      if(free.length>0) out.push({date:ds,dow,slots:free,busy:busyCount});
+
+      // Build set of occupied minutes (each appointment blocks start → start+50 min)
+      const occupiedMins=new Set();
+      appointments.filter(a=>a.date===ds&&a.status!=="cancelled").forEach(a=>{
+        const [hh,mm]=a.time.split(":").map(Number);
+        const startMin=hh*60+mm;
+        // Block every 30-min slot that overlaps the 50-min session
+        for(let m=startMin;m<startMin+50;m+=30){
+          occupiedMins.add(m);
+        }
+        // Also block the slot starting during the session
+        for(let m=startMin;m<startMin+50;m++){
+          occupiedMins.add(m);
+        }
+      });
+
+      // Only show :00 slots; a slot is free if its start minute is not occupied
+      const free=WORK_SLOTS.filter(h=>{
+        if(!h.endsWith(":00"))return false;
+        const [sh,sm]=h.split(":").map(Number);
+        const slotMin=sh*60+sm;
+        // Slot is free if no occupied minute falls within [slotMin, slotMin+50)
+        for(let m=slotMin;m<slotMin+50;m++){
+          if(occupiedMins.has(m))return false;
+        }
+        return !isBlocked(ds,h);
+      });
+
+      const busyCount=appointments.filter(a=>a.date===ds&&a.status!=="cancelled").length;
+      if(free.length>0)out.push({date:ds,dow,slots:free,busy:busyCount});
     }
     return out;
   },[appointments,days,schedule]);
@@ -1514,8 +1579,20 @@ function Agenda({data,setData,slotDays,setSlotDays}){
   const SL={confirmed:"Confirmada",done:"Realizada",pending:"Pendiente",cancelled:"Cancelada"};
   const SC_BG={confirmed:C.accent+"28",done:C.green+"28",pending:C.yellow+"28",cancelled:C.muted+"18"};
 
-  // Find appointment at exact date+slot
+  // Returns appointments that START at this slot
   const apptAt=(date,slot)=>appointments.filter(a=>a.date===date&&a.time===slot&&a.status!=="cancelled");
+
+  // Returns true if any appointment's 50-min window covers this slot (for coloring non-start cells)
+  const slotCoveredBy=(date,slot)=>{
+    const [sh,sm]=slot.split(":").map(Number);
+    const slotMin=sh*60+sm;
+    return appointments.filter(a=>{
+      if(a.date!==date||a.status==="cancelled")return false;
+      const [ah,am]=a.time.split(":").map(Number);
+      const startMin=ah*60+am;
+      return slotMin>startMin && slotMin<startMin+50;
+    });
+  };
 
   const COL_W=viewMode==="day"?200:viewMode==="week"?50:38;
   // Row height for half-hour slots
@@ -1622,31 +1699,26 @@ function Agenda({data,setData,slotDays,setSlotDays}){
                 {/* Day columns */}
                 {viewDays.map(d=>{
                   const appts=apptAt(d,slot);
+                  const covered=slotCoveredBy(d,slot); // appointments whose window covers this slot
                   const blocked=isBlocked(d,slot);
                   const dow=new Date(d+"T12:00:00").getDay();
                   const isWeekend=dow===0||dow===6;
-                  const isToday=d===getToday();
                   const isPast=(()=>{const n=new Date();const dDate=new Date(d+"T"+slot+":00");return dDate<n;})();
 
                   // Cell background
                   let cellBg="transparent";
-                  if(blocked) cellBg="#2a1212"; // dark red — blocked
-                  else if(isWeekend) cellBg=C.surface+"88"; // dimmed weekend
-                  else if(appts.length===0 && !isPast) cellBg=C.green+"0a"; // subtle green = free
-                  else if(appts.length===0 && isPast) cellBg="transparent"; // past empty = neutral
+                  const isOccupied=appts.length>0||covered.length>0;
+                  if(blocked) cellBg="#2a1212";
+                  else if(isWeekend) cellBg=C.surface+"88";
+                  else if(!isOccupied && !isPast) cellBg=C.green+"0a"; // free = subtle green
+                  // occupied cells get bg from the appointment color
 
                   return (
                     <div key={d} style={{width:COL_W,flexShrink:0,padding:"1px 2px",borderLeft:`1px solid ${C.border}22`,height:ROW_H,position:"relative",background:cellBg,transition:"background .1s"}}>
                       {blocked?(
-                        // Blocked slot — show striped pattern, no booking
                         <div style={{position:"absolute",inset:0,backgroundImage:`repeating-linear-gradient(45deg,transparent,transparent 3px,${C.red}15 3px,${C.red}15 6px)`,borderRadius:3,pointerEvents:"none"}}/>
-                      ):appts.length===0?(
-                        // Free slot — tap to book
-                        <button onClick={()=>bookSlot(d,slot)}
-                          style={{position:"absolute",inset:0,background:"transparent",border:"none",cursor:isPast||isWeekend?"default":"pointer",borderRadius:3}}
-                          disabled={isPast||isWeekend}/>
-                      ):(
-                        // Occupied
+                      ):appts.length>0?(
+                        // Start of appointment
                         appts.map(a=>(
                           <div key={a.id} onClick={()=>toggle(a.id)}
                             style={{background:SC_BG[a.status],border:`1.5px solid ${SC[a.status]}88`,borderRadius:4,padding:viewMode==="day"?"3px 6px":"1px 3px",cursor:"pointer",height:"100%",overflow:"hidden",boxSizing:"border-box"}}>
@@ -1656,12 +1728,18 @@ function Agenda({data,setData,slotDays,setSlotDays}){
                                 <div style={{fontSize:12,color:C.text,fontWeight:600,marginTop:1,lineHeight:1.2}}>{a.patientName}</div>
                               </>
                             ):(
-                              <>
-                                <div style={{fontSize:8,color:SC[a.status],fontWeight:700,lineHeight:1.1,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{a.patientName.split(" ")[0]}</div>
-                              </>
+                              <div style={{fontSize:8,color:SC[a.status],fontWeight:700,lineHeight:1.1,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{a.patientName.split(" ")[0]}</div>
                             )}
                           </div>
                         ))
+                      ):covered.length>0?(
+                        // Continuation of a running appointment — show as occupied, no-tap
+                        <div style={{position:"absolute",inset:0,background:SC_BG[covered[0].status],borderLeft:`2px solid ${SC[covered[0].status]}66`,opacity:.6,pointerEvents:"none",borderRadius:2}}/>
+                      ):(
+                        // Free slot
+                        <button onClick={()=>bookSlot(d,slot)}
+                          style={{position:"absolute",inset:0,background:"transparent",border:"none",cursor:isPast||isWeekend?"default":"pointer",borderRadius:3}}
+                          disabled={isPast||isWeekend}/>
                       )}
                     </div>
                   );
