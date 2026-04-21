@@ -241,7 +241,7 @@ const C={bg:"#0f1117",surface:"#181c27",card:"#1e2235",border:"#2a3050",
   accent:"#6c8fff",al:"#8facff",green:"#4ecb8b",yellow:"#f5c842",red:"#ff6b6b",text:"#e8eaf6",muted:"#7b83a6"};
 
 // ── STORAGE ──────────────────────────────────────────────────────────────────
-const SK="sonia_v9";
+const SK="sonia_v10";
 const SEED={
   therapist:{name:"",specialty:"Psicología Clínica",cedula:"",address:"",phone:"",email:"",
     payments:[{id:1,label:"CLABE",value:""},{id:2,label:"Mercado Pago",value:""}]},
@@ -1263,10 +1263,31 @@ function Pacientes({data,setData}){
       {addModal&&(
         <Sheet onClose={()=>setAddModal(false)} title="Nuevo Paciente">
           <div style={{display:"flex",flexDirection:"column",gap:14}}>
+            {/* Contacts API import — Android Chrome only */}
+            {typeof navigator!=="undefined"&&navigator.contacts&&(
+              <button onClick={async()=>{
+                  try{
+                    const c=await navigator.contacts.select(["name","tel","email"],{multiple:false});
+                    if(c&&c.length>0){
+                      const ct=c[0];
+                      const name=(ct.name&&ct.name[0])||"";
+                      const phone=(ct.tel&&ct.tel[0])||"";
+                      const email=(ct.email&&ct.email[0])||"";
+                      setForm(f=>({...f,name:name.trim(),phone:phone.trim(),email:email.trim()}));
+                    }
+                  }catch(e){}
+                }}
+                style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8,background:C.green+"18",border:`1px solid ${C.green}44`,borderRadius:10,padding:"10px 0",color:C.green,fontSize:13,fontWeight:600,cursor:"pointer"}}>
+                📒 Importar desde Contactos
+              </button>
+            )}
             <Fld label="Nombre completo *" value={form.name} onChange={v=>setForm(f=>({...f,name:v}))} placeholder="Nombre Apellido"/>
             <Fld label="Teléfono" value={form.phone} onChange={v=>setForm(f=>({...f,phone:v}))} placeholder="+52 55 0000 0000" type="tel"/>
             <Fld label="Correo electrónico" value={form.email} onChange={v=>setForm(f=>({...f,email:v}))} placeholder="correo@ejemplo.com" type="email"/>
             <Fld label="Fecha de inicio" value={form.since} onChange={v=>setForm(f=>({...f,since:v}))} type="date"/>
+            <div style={{fontSize:11,color:C.muted,textAlign:"center",lineHeight:1.5}}>
+              {!navigator.contacts&&"📒 Importar desde Contactos solo disponible en Android Chrome"}
+            </div>
             <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}><Btn variant="ghost" onClick={()=>setAddModal(false)}>Cancelar</Btn><Btn onClick={addPatient} disabled={!form.name.trim()}>Agregar</Btn></div>
           </div>
         </Sheet>
@@ -1633,7 +1654,6 @@ function Agenda({data,setData,slotDays,setSlotDays}){
                               <>
                                 <div style={{fontSize:10,color:SC[a.status],fontWeight:700,lineHeight:1.2}}>{a.time} · {SL[a.status]}</div>
                                 <div style={{fontSize:12,color:C.text,fontWeight:600,marginTop:1,lineHeight:1.2}}>{a.patientName}</div>
-                                <div style={{fontSize:10,color:C.muted}}>${a.fee.toLocaleString()}</div>
                               </>
                             ):(
                               <>
@@ -1697,6 +1717,20 @@ function Agenda({data,setData,slotDays,setSlotDays}){
                 📅 Se agendará: {pendingSlot.date} · {pendingSlot.time}
               </div>
             )}
+            {typeof navigator!=="undefined"&&navigator.contacts&&(
+              <button onClick={async()=>{
+                  try{
+                    const c=await navigator.contacts.select(["name","tel","email"],{multiple:false});
+                    if(c&&c.length>0){
+                      const ct=c[0];
+                      setNPF(f=>({...f,name:(ct.name&&ct.name[0])||f.name,phone:(ct.tel&&ct.tel[0])||f.phone,email:(ct.email&&ct.email[0])||f.email}));
+                    }
+                  }catch(e){}
+                }}
+                style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8,background:C.green+"18",border:`1px solid ${C.green}44`,borderRadius:10,padding:"10px 0",color:C.green,fontSize:13,fontWeight:600,cursor:"pointer"}}>
+                📒 Importar desde Contactos
+              </button>
+            )}
             <Fld label="Nombre completo *" value={newPatForm.name} onChange={v=>setNPF(f=>({...f,name:v}))} placeholder="Nombre Apellido"/>
             <Fld label="Teléfono" value={newPatForm.phone} onChange={v=>setNPF(f=>({...f,phone:v}))} placeholder="+52 55 0000 0000" type="tel"/>
             <Fld label="Correo electrónico" value={newPatForm.email} onChange={v=>setNPF(f=>({...f,email:v}))} placeholder="correo@ejemplo.com" type="email"/>
@@ -1726,267 +1760,6 @@ function Agenda({data,setData,slotDays,setSlotDays}){
           setDaySchedule={ds=>setData(d=>({...d,daySchedule:ds}))}
           onClose={()=>setScheduleModal(false)}
         />
-      )}
-    </div>
-  );
-}
-
-  const getWeekStart=useCallback(d=>{
-    const base=new Date(d+"T12:00:00"),dow=base.getDay(),diff=dow===0?-6:1-dow;
-    base.setDate(base.getDate()+diff);
-    return base.toISOString().split("T")[0];
-  },[]);
-
-  const [weekStart,setWeekStart]=useState(()=>getWeekStart(TODAY));
-  const [selDate,setSelDate]=useState(TODAY);
-
-  const numDays = viewMode==="day"?1:viewMode==="week"?5:10;
-
-  const viewDays=useMemo(()=>{
-    if(viewMode==="day") return [selDate];
-    return Array.from({length:numDays},(_,i)=>addDays(weekStart,i));
-  },[viewMode,selDate,weekStart,numDays]);
-
-  const prevPeriod=()=>{
-    if(viewMode==="day") setSelDate(d=>addDays(d,-1));
-    else setWeekStart(d=>addDays(d,viewMode==="week"?-7:-14));
-  };
-  const nextPeriod=()=>{
-    if(viewMode==="day") setSelDate(d=>addDays(d,1));
-    else setWeekStart(d=>addDays(d,viewMode==="week"?7:14));
-  };
-  const goToday=()=>{ setWeekStart(getWeekStart(TODAY)); setSelDate(TODAY); };
-
-  const periodLabel=useMemo(()=>{
-    if(viewMode==="day"){
-      const d=new Date(selDate+"T12:00:00");
-      const months=["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"];
-      return `${WDAYS_FULL[d.getDay()]} ${d.getDate()} ${months[d.getMonth()]}`;
-    }
-    const s=new Date(viewDays[0]+"T12:00:00"),e=new Date(viewDays[viewDays.length-1]+"T12:00:00");
-    const months=["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"];
-    if(s.getMonth()===e.getMonth()) return `${months[s.getMonth()]} ${s.getFullYear()}`;
-    return `${months[s.getMonth()]}–${months[e.getMonth()]} ${e.getFullYear()}`;
-  },[viewMode,selDate,viewDays]);
-
-  const todayVisible = viewDays.includes(TODAY);
-
-  // Add appointment to existing patient
-  const addAppt=()=>{
-    const p=patients.find(p=>p.id===parseInt(form.patientId));if(!p)return;
-    setData(d=>({...d,appointments:[...d.appointments,{id:Date.now(),patientId:p.id,patientName:p.name,date:form.date,time:form.time,duration:50,status:form.status,fee:parseInt(form.fee)||DEFAULT_FEE}]}));
-    setModal(false);
-    if(viewMode!=="day") setWeekStart(getWeekStart(form.date));
-    else setSelDate(form.date);
-  };
-
-  // Add NEW patient and optionally book the clicked slot
-  const addNewPatientAndBook=()=>{
-    if(!newPatForm.name.trim())return;
-    const newP={id:Date.now(),name:newPatForm.name.trim(),phone:newPatForm.phone.trim(),email:newPatForm.email.trim(),since:newPatForm.since||TODAY};
-    setData(d=>{
-      const updated={...d,patients:[...d.patients,newP]};
-      if(newPatForm.bookSlot&&pendingSlot){
-        updated.appointments=[...d.appointments,{id:Date.now()+1,patientId:newP.id,patientName:newP.name,date:pendingSlot.date,time:pendingSlot.time,duration:50,status:"confirmed",fee:DEFAULT_FEE}];
-      }
-      return updated;
-    });
-    setNewPatientModal(false);
-    setPendingSlot(null);
-    setNPF({name:"",phone:"",email:"",since:TODAY,bookSlot:true});
-  };
-
-  // Slot click: open modal pre-filled
-  const bookSlot=(date,time)=>{
-    setPendingSlot({date,time});
-    setForm(f=>({...f,date,time,patientId:""}));
-    setModal(true);
-  };
-
-  const toggle=id=>setData(d=>({...d,appointments:d.appointments.map(a=>a.id===id?{...a,status:a.status==="confirmed"?"done":a.status==="done"?"cancelled":"confirmed"}:a)}));
-
-  const SC={confirmed:C.accent,done:C.green,pending:C.yellow,cancelled:C.muted};
-  const SL={confirmed:"Confirmada",done:"Realizada",pending:"Pendiente",cancelled:"Cancelada"};
-  const SC_BG={confirmed:C.accent+"22",done:C.green+"22",pending:C.yellow+"22",cancelled:C.muted+"11"};
-
-  const apptAt=(date,time)=>appointments.filter(a=>a.date===date&&a.time===time&&a.status!=="cancelled");
-
-  // Column width depends on how many days shown
-  const COL_W = viewMode==="day"?220:viewMode==="week"?52:40;
-
-  return (
-    <div className="fi">
-      {/* ── Top controls ── */}
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-        <div>
-          <h2 style={{fontFamily:"Fraunces",fontSize:22,fontWeight:400}}>Agenda</h2>
-          <div style={{fontSize:12,color:C.muted,marginTop:1}}>{periodLabel}</div>
-        </div>
-        <div style={{display:"flex",gap:5,alignItems:"center"}}>
-          {!todayVisible&&<button onClick={goToday} style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,color:C.muted,fontSize:10,padding:"5px 8px"}}>Hoy</button>}
-          <button onClick={prevPeriod} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,color:C.muted,fontSize:14,padding:"5px 9px"}}>‹</button>
-          <button onClick={nextPeriod} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,color:C.muted,fontSize:14,padding:"5px 9px"}}>›</button>
-          <Btn small onClick={()=>{setForm(f=>({...f,date:viewMode==="day"?selDate:TODAY}));setModal(true);}}>+ Cita</Btn>
-        </div>
-      </div>
-
-      {/* ── View mode pills ── ABOVE free slots */}
-      <div style={{display:"flex",gap:6,marginBottom:14}}>
-        {[{id:"day",l:"Día"},{id:"week",l:"Semana"},{id:"biweek",l:"2 Semanas"}].map(v=>(
-          <button key={v.id} onClick={()=>setViewMode(v.id)}
-            style={{padding:"6px 14px",borderRadius:20,border:`1px solid ${viewMode===v.id?C.accent:C.border}`,background:viewMode===v.id?C.accent:"transparent",color:viewMode===v.id?"#fff":C.muted,fontSize:12,fontWeight:500,transition:"all .15s"}}>
-            {v.l}
-          </button>
-        ))}
-        {/* Day date picker when in day mode */}
-        {viewMode==="day"&&(
-          <input type="date" value={selDate} onChange={e=>setSelDate(e.target.value)}
-            style={{marginLeft:4,background:C.surface,color:C.text,border:`1px solid ${C.border}`,borderRadius:8,padding:"5px 8px",fontSize:11,flex:1}}/>
-        )}
-      </div>
-
-      {/* ── Free slots (ABOVE the grid) ── */}
-      <FreeSlots appointments={appointments} onBook={bookSlot} days={slotDays} setDays={setSlotDays}/>
-
-      {/* ── Grid ── */}
-      <div style={{overflowX:"auto",WebkitOverflowScrolling:"touch",marginLeft:-14,marginRight:-14,paddingLeft:14}}>
-        <div style={{minWidth:viewMode==="day"?280:320}}>
-          {/* Day header */}
-          {viewMode!=="day"&&(
-            <div style={{display:"flex",marginBottom:2,paddingLeft:34}}>
-              {viewDays.map(d=>{
-                const dow=new Date(d+"T12:00:00").getDay();
-                const dayNum=new Date(d+"T12:00:00").getDate();
-                const isToday=d===TODAY;
-                const hasCita=appointments.some(a=>a.date===d&&a.status!=="cancelled");
-                return (
-                  <div key={d} style={{width:COL_W,flexShrink:0,textAlign:"center",padding:"5px 1px"}}>
-                    <div style={{fontSize:9,color:C.muted,fontWeight:500,marginBottom:2}}>{WDAYS[dow]}</div>
-                    <div style={{width:24,height:24,borderRadius:"50%",background:isToday?C.accent:"transparent",color:isToday?"#fff":C.text,fontSize:12,fontWeight:isToday?700:500,display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto"}}>{dayNum}</div>
-                    {hasCita&&<div style={{width:3,height:3,borderRadius:"50%",background:isToday?C.al:C.accent,margin:"2px auto 0"}}/>}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-
-          {/* Time rows */}
-          {WORK_HOURS.map(hour=>{
-            const [hh]=hour.split(":").map(Number);
-            const isNow=(()=>{const n=new Date();return n.toISOString().split("T")[0]===TODAY&&n.getHours()===hh;})();
-            return (
-              <div key={hour} style={{display:"flex",minHeight:viewMode==="day"?54:48,borderTop:`1px solid ${C.border}22`}}>
-                {/* Time label */}
-                <div style={{width:34,flexShrink:0,paddingTop:3,fontSize:10,color:isNow?C.accent:C.muted,fontWeight:isNow?600:400,textAlign:"right",paddingRight:5}}>
-                  {hour}
-                </div>
-                {/* Columns */}
-                {viewDays.map(d=>{
-                  const appts=apptAt(d,hour);
-                  return (
-                    <div key={d} style={{width:COL_W,flexShrink:0,padding:"2px 2px",borderLeft:`1px solid ${C.border}22`,minHeight:viewMode==="day"?54:48,position:"relative"}}>
-                      {appts.length===0?(
-                        <button onClick={()=>bookSlot(d,hour)}
-                          style={{position:"absolute",inset:0,background:"transparent",border:"none",cursor:"pointer",borderRadius:4}}
-                          title={`Agendar ${d} ${hour}`}/>
-                      ):(
-                        appts.map(a=>(
-                          <div key={a.id} onClick={()=>toggle(a.id)}
-                            style={{background:SC_BG[a.status],border:`1px solid ${SC[a.status]}55`,borderRadius:5,padding:viewMode==="day"?"4px 7px":"2px 4px",cursor:"pointer",marginBottom:1}}>
-                            {viewMode==="day"?(
-                              <>
-                                <div style={{fontSize:11,color:SC[a.status],fontWeight:700}}>{a.time} · {SL[a.status]}</div>
-                                <div style={{fontSize:13,color:C.text,fontWeight:600,marginTop:1}}>{a.patientName}</div>
-                                <div style={{fontSize:11,color:C.muted}}>${a.fee.toLocaleString()}</div>
-                              </>
-                            ):(
-                              <>
-                                <div style={{fontSize:9,color:SC[a.status],fontWeight:700,lineHeight:1.1}}>{a.time}</div>
-                                <div style={{fontSize:9,color:C.text,lineHeight:1.1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:COL_W-8}}>{a.patientName.split(" ")[0]}</div>
-                                <div style={{fontSize:8,color:C.muted}}>{SL[a.status].slice(0,4)}</div>
-                              </>
-                            )}
-                          </div>
-                        ))
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
-      <div style={{fontSize:11,color:C.muted,textAlign:"center",marginTop:8,marginBottom:4}}>
-        Toca celda vacía para agendar · Toca cita para cambiar estado
-      </div>
-
-      {/* ── Book appointment modal ── */}
-      {modal&&(
-        <Sheet onClose={()=>setModal(false)} title={pendingSlot?`Nueva cita · ${pendingSlot.date} ${pendingSlot.time}`:"Nueva Cita"}>
-          <div style={{display:"flex",flexDirection:"column",gap:14}}>
-            {patients.length===0?(
-              <div>
-                <div style={{textAlign:"center",padding:"12px 0",color:C.muted,fontSize:13,marginBottom:12}}>No hay pacientes registrados aún.</div>
-                <Btn full onClick={()=>{setModal(false);setNewPatientModal(true);}}>+ Agregar nuevo paciente</Btn>
-              </div>
-            ):(
-              <>
-                <Fld label="Paciente" value={form.patientId} onChange={v=>setForm(f=>({...f,patientId:v}))} options={[{v:"",l:"Seleccionar..."}, ...patients.map(p=>({v:p.id,l:p.name}))]}/>
-                {/* Add new patient shortcut */}
-                <button onClick={()=>{setModal(false);setNewPatientModal(true);}}
-                  style={{background:"none",border:`1px dashed ${C.border}`,borderRadius:8,color:C.muted,fontSize:12,padding:"8px 0",textAlign:"center",cursor:"pointer"}}>
-                  + Agregar nuevo paciente en su lugar
-                </button>
-                <div style={{display:"flex",gap:10}}>
-                  <div style={{flex:1}}><Fld label="Fecha" type="date" value={form.date} onChange={v=>setForm(f=>({...f,date:v}))}/></div>
-                  <div style={{width:110}}><Fld label="Hora" type="time" value={form.time} onChange={v=>setForm(f=>({...f,time:v}))}/></div>
-                </div>
-                <Fld label="Honorario (pesos)" type="number" value={form.fee} onChange={v=>setForm(f=>({...f,fee:v}))} placeholder={String(DEFAULT_FEE)}/>
-                <Fld label="Estado" value={form.status} onChange={v=>setForm(f=>({...f,status:v}))} options={[{v:"confirmed",l:"Confirmada"},{v:"pending",l:"Pendiente"}]}/>
-                <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
-                  <Btn variant="ghost" onClick={()=>setModal(false)}>Cancelar</Btn>
-                  <Btn onClick={addAppt} disabled={!form.patientId}>Guardar</Btn>
-                </div>
-              </>
-            )}
-          </div>
-        </Sheet>
-      )}
-
-      {/* ── Add new patient modal (from agenda cell) ── */}
-      {newPatientModal&&(
-        <Sheet onClose={()=>{setNewPatientModal(false);setPendingSlot(null);}} title="Nuevo Paciente">
-          <div style={{display:"flex",flexDirection:"column",gap:14}}>
-            {pendingSlot&&(
-              <div style={{background:C.accent+"18",border:`1px solid ${C.accent}44`,borderRadius:8,padding:"8px 12px",fontSize:12,color:C.al}}>
-                📅 Se agendará en: {pendingSlot.date} · {pendingSlot.time}
-              </div>
-            )}
-            <Fld label="Nombre completo *" value={newPatForm.name} onChange={v=>setNPF(f=>({...f,name:v}))} placeholder="Nombre Apellido"/>
-            <Fld label="Teléfono" value={newPatForm.phone} onChange={v=>setNPF(f=>({...f,phone:v}))} placeholder="+52 55 0000 0000" type="tel"/>
-            <Fld label="Correo electrónico" value={newPatForm.email} onChange={v=>setNPF(f=>({...f,email:v}))} placeholder="correo@ejemplo.com" type="email"/>
-            <Fld label="Fecha de inicio" value={newPatForm.since} onChange={v=>setNPF(f=>({...f,since:v}))} type="date"/>
-            {pendingSlot&&(
-              <div style={{display:"flex",alignItems:"center",gap:10,background:C.surface,borderRadius:8,padding:"10px 14px"}}>
-                <div style={{width:20,height:20,borderRadius:5,background:newPatForm.bookSlot?C.accent:C.surface,border:`2px solid ${newPatForm.bookSlot?C.accent:C.border}`,flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer"}}
-                  onClick={()=>setNPF(f=>({...f,bookSlot:!f.bookSlot}))}>
-                  {newPatForm.bookSlot&&<span style={{color:"#fff",fontSize:12,fontWeight:700}}>✓</span>}
-                </div>
-                <div style={{fontSize:12,color:C.text,cursor:"pointer"}} onClick={()=>setNPF(f=>({...f,bookSlot:!f.bookSlot}))}>
-                  Agendar cita el {pendingSlot.date} a las {pendingSlot.time}
-                </div>
-              </div>
-            )}
-            <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
-              <Btn variant="ghost" onClick={()=>{setNewPatientModal(false);setPendingSlot(null);}}>Cancelar</Btn>
-              <Btn onClick={addNewPatientAndBook} disabled={!newPatForm.name.trim()}>
-                {pendingSlot&&newPatForm.bookSlot?"Agregar y agendar":"Agregar paciente"}
-              </Btn>
-            </div>
-          </div>
-        </Sheet>
       )}
     </div>
   );

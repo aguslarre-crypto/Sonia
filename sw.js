@@ -1,6 +1,6 @@
 // sonia-sw-v5
 // Strategy: network-first for HTML (always get fresh app), cache-first for assets
-const CACHE = 'sonia-v9';
+const CACHE = 'sonia-v10';
 const HTML_FILES = ['/', './','./index.html'];
 const STATIC_FILES = ['./sw.js','./manifest.json','./icon-192.png','./icon-512.png'];
 
