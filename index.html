@@ -174,7 +174,7 @@ function useNotifications(data, setData){
     return()=>clearInterval(t);
   },[data.appointments,prompt]);
 
-  const resolvePrompt=useCallback((apptId,sessionDone,paymentDone,fee)=>{
+  const resolvePrompt=useCallback((apptId,sessionDone,paymentDone,fee,method)=>{
     setData(d=>{
       let appts=d.appointments.map(a=>{
         if(a.id!==apptId)return a;
@@ -185,7 +185,7 @@ function useNotifications(data, setData){
         const appt=d.appointments.find(a=>a.id===apptId);
         if(appt){
           pays=[...pays,{id:Date.now(),patientId:appt.patientId,patientName:appt.patientName,
-            date:getToday(),amount:fee||DEFAULT_FEE,method:"efectivo",concept:`Sesión ${appt.time}`,status:"paid"}];
+            date:getToday(),amount:fee||DEFAULT_FEE,method:method||"efectivo",concept:`Sesión ${appt.time}`,status:"paid"}];
         }
       }
       return{...d,appointments:appts,payments:pays};
@@ -203,9 +203,9 @@ function useNotifications(data, setData){
 
 // ── SESSION CONFIRM PROMPT ────────────────────────────────────────────────────
 function SessionPrompt({appt, patients, onResolve, onDismiss}){
-  const patient = patients.find(p=>p.id===appt.patientId);
   const fee = appt.fee || DEFAULT_FEE;
-  const [paid, setPaid] = useState(true);
+  // step: "session" | "payment"
+  const [step, setStep] = useState("session");
 
   return (
     <div className="ov" onClick={()=>onDismiss(appt.id)}>
@@ -213,65 +213,55 @@ function SessionPrompt({appt, patients, onResolve, onDismiss}){
         <div className="hdl"/>
         <div style={{textAlign:"center",marginBottom:20}}>
           <div style={{fontSize:32,marginBottom:8}}>🔔</div>
-          <div style={{fontFamily:"Fraunces",fontSize:18,fontWeight:400,marginBottom:4}}>¿Cómo salió la sesión?</div>
-          <div style={{fontSize:13,color:C.muted}}>{appt.patientName} · {appt.time}</div>
-        </div>
-
-        <div style={{display:"flex",gap:10,marginBottom:20}}>
-          <button onClick={()=>{
-              // session happened — ask about payment
-              const payRow = (
-                <div style={{marginBottom:20}}>
-                  <div style={{fontSize:13,color:C.text,marginBottom:12,textAlign:"center"}}>¿Se cobró la sesión?</div>
-                  <div style={{display:"flex",gap:8,alignItems:"center",justifyContent:"center",marginBottom:4}}>
-                    <button onClick={()=>onResolve(appt.id,true,true,fee)}
-                      style={{flex:1,background:C.green+"22",border:`1px solid ${C.green}44`,borderRadius:10,padding:"12px 0",color:C.green,fontSize:13,fontWeight:600}}>
-                      ✓ Sí, cobré ${fee.toLocaleString()}
-                    </button>
-                    <button onClick={()=>onResolve(appt.id,true,false,fee)}
-                      style={{flex:1,background:C.yellow+"22",border:`1px solid ${C.yellow}44`,borderRadius:10,padding:"12px 0",color:C.yellow,fontSize:13,fontWeight:600}}>
-                      Pendiente
-                    </button>
-                  </div>
-                </div>
-              );
-              // Replace content — we'll use a trick: just call resolve with sessionDone=true
-              // and ask payment in the same action via a second step rendered inline
-              // For simplicity: open a quick inline toggle
-              document.getElementById('sp-step2').style.display='block';
-              document.getElementById('sp-step1').style.display='none';
-            }}
-            style={{flex:1,background:C.green+"22",border:`1px solid ${C.green}44`,borderRadius:12,padding:"16px 0",color:C.green,fontSize:14,fontWeight:600}}>
-            ✓ Sí se realizó
-          </button>
-          <button onClick={()=>onResolve(appt.id,false,false,fee)}
-            style={{flex:1,background:C.red+"22",border:`1px solid ${C.red}44`,borderRadius:12,padding:"16px 0",color:C.red,fontSize:14,fontWeight:600}}>
-            ✗ No se realizó
-          </button>
-        </div>
-
-        <div id="sp-step1" style={{textAlign:"center"}}>
-          <button onClick={()=>onDismiss(appt.id)} style={{background:"none",color:C.muted,fontSize:12,padding:"8px 0"}}>
-            Preguntar después
-          </button>
-        </div>
-
-        <div id="sp-step2" style={{display:"none"}}>
-          <div style={{fontSize:13,color:C.text,marginBottom:12,textAlign:"center",fontWeight:600}}>¿Se cobró la sesión?</div>
-          <div style={{display:"flex",gap:8,marginBottom:12}}>
-            <button onClick={()=>onResolve(appt.id,true,true,fee)}
-              style={{flex:1,background:C.green+"22",border:`1px solid ${C.green}44`,borderRadius:10,padding:"13px 0",color:C.green,fontSize:13,fontWeight:600}}>
-              💵 Sí, ${fee.toLocaleString()}
-            </button>
-            <button onClick={()=>onResolve(appt.id,true,false,fee)}
-              style={{flex:1,background:C.yellow+"22",border:`1px solid ${C.yellow}44`,borderRadius:10,padding:"13px 0",color:C.yellow,fontSize:13,fontWeight:600}}>
-              ⏳ Queda pendiente
-            </button>
+          <div style={{fontFamily:"Fraunces",fontSize:18,fontWeight:400,marginBottom:4}}>
+            {step==="session"?"¿Cómo salió la sesión?":"¿Cómo se cobró?"}
           </div>
-          <button onClick={()=>onDismiss(appt.id)} style={{background:"none",color:C.muted,fontSize:12,padding:"4px 0",display:"block",margin:"0 auto"}}>
-            Preguntar después
-          </button>
+          <div style={{fontSize:13,color:C.muted}}>{appt.patientName} · {appt.time} · ${fee.toLocaleString()}</div>
         </div>
+
+        {step==="session"&&(
+          <>
+            <div style={{display:"flex",gap:10,marginBottom:20}}>
+              <button onClick={()=>setStep("payment")}
+                style={{flex:1,background:C.green+"22",border:`1px solid ${C.green}44`,borderRadius:12,padding:"16px 0",color:C.green,fontSize:14,fontWeight:600}}>
+                ✓ Sí se realizó
+              </button>
+              <button onClick={()=>onResolve(appt.id,false,false,fee,"efectivo")}
+                style={{flex:1,background:C.red+"22",border:`1px solid ${C.red}44`,borderRadius:12,padding:"16px 0",color:C.red,fontSize:14,fontWeight:600}}>
+                ✗ No se realizó
+              </button>
+            </div>
+            <div style={{textAlign:"center"}}>
+              <button onClick={()=>onDismiss(appt.id)} style={{background:"none",color:C.muted,fontSize:12,padding:"8px 0"}}>
+                Preguntar después
+              </button>
+            </div>
+          </>
+        )}
+
+        {step==="payment"&&(
+          <>
+            <div style={{display:"flex",flexDirection:"column",gap:10,marginBottom:16}}>
+              <button onClick={()=>onResolve(appt.id,true,true,fee,"efectivo")}
+                style={{background:C.green+"22",border:`1px solid ${C.green}44`,borderRadius:12,padding:"14px 0",color:C.green,fontSize:14,fontWeight:600}}>
+                💵 Cobré en efectivo
+              </button>
+              <button onClick={()=>onResolve(appt.id,true,true,fee,"digital")}
+                style={{background:C.accent+"22",border:`1px solid ${C.accent}44`,borderRadius:12,padding:"14px 0",color:C.al,fontSize:14,fontWeight:600}}>
+                📱 Cobré de forma digital
+              </button>
+              <button onClick={()=>onResolve(appt.id,true,false,fee,"efectivo")}
+                style={{background:C.yellow+"22",border:`1px solid ${C.yellow}44`,borderRadius:12,padding:"14px 0",color:C.yellow,fontSize:14,fontWeight:600}}>
+                ⏳ Queda pendiente de cobro
+              </button>
+            </div>
+            <div style={{textAlign:"center"}}>
+              <button onClick={()=>setStep("session")} style={{background:"none",color:C.muted,fontSize:12,padding:"4px 0"}}>
+                ← Volver
+              </button>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -281,7 +271,7 @@ const C={bg:"#0f1117",surface:"#181c27",card:"#1e2235",border:"#2a3050",
   accent:"#6c8fff",al:"#8facff",green:"#4ecb8b",yellow:"#f5c842",red:"#ff6b6b",text:"#e8eaf6",muted:"#7b83a6"};
 
 // ── STORAGE ──────────────────────────────────────────────────────────────────
-const SK="sonia_v12";
+const SK="sonia_v13";
 const SEED={
   therapist:{name:"",specialty:"Psicología Clínica",cedula:"",address:"",phone:"",email:"",
     payments:[{id:1,label:"CLABE",value:""},{id:2,label:"Mercado Pago",value:""}]},
@@ -881,22 +871,40 @@ function PatientProfile({patient,data,setData,onBack}){
     setTimeout(()=>setSchedulePreview(null),3500);
   };
 
-  // Generate preview of next N sessions
+  // Generate preview of next N sessions using same logic as autoScheduleSessions
   const previewSessions = useMemo(()=>{
     if(!patient.frequency||patient.frequency==="none"||patient.preferredDay===undefined||!patient.preferredTime) return [];
-    const intervalDays = patient.frequency==="weekly"?7:14;
-    const result=[];
-    const pConfirmed=appointments.filter(a=>a.patientId===patient.id&&(a.status==="confirmed"||a.status==="done")).sort((a,b)=>b.date.localeCompare(a.date));
-    let cursor = pConfirmed.length>0 ? new Date(pConfirmed[0].date+"T12:00:00") : new Date(TODAY+"T12:00:00");
+    const intervalDays=patient.frequency==="weekly"?7:14;
     const targetDow=parseInt(patient.preferredDay);
-    for(let i=0;i<6;i++){
-      cursor.setDate(cursor.getDate()+intervalDays);
-      let tries=0;
-      while(cursor.getDay()!==targetDow&&tries<14){cursor.setDate(cursor.getDate()+1);tries++;}
+    const today=getToday();
+
+    const findNextDow=(base,dow)=>{
+      const d=new Date(base);let tries=0;
+      while(d.getDay()!==dow&&tries<14){d.setDate(d.getDate()+1);tries++;}
+      return new Date(d);
+    };
+
+    const pConfirmed=appointments.filter(a=>a.patientId===patient.id&&(a.status==="confirmed"||a.status==="done")).sort((a,b)=>b.date.localeCompare(a.date));
+
+    let cursor;
+    if(pConfirmed.length>0){
+      const next=new Date(pConfirmed[0].date+"T12:00:00");
+      next.setDate(next.getDate()+intervalDays);
+      cursor=findNextDow(next,targetDow);
+    } else {
+      cursor=findNextDow(new Date(today+"T12:00:00"),targetDow);
+    }
+
+    const result=[];
+    let safety=0;
+    while(result.length<6&&safety++<60){
       const ds=cursor.toISOString().split("T")[0];
-      const existing=appointments.find(a=>a.patientId===patient.id&&a.date===ds&&a.status!=="cancelled");
-      result.push({date:ds,time:patient.preferredTime,exists:!!existing});
-      cursor=new Date(cursor); // clone
+      if(ds>=today){
+        const existing=appointments.find(a=>a.patientId===patient.id&&a.date===ds&&a.status!=="cancelled");
+        result.push({date:ds,time:patient.preferredTime,exists:!!existing});
+      }
+      cursor.setDate(cursor.getDate()+intervalDays);
+      cursor=findNextDow(cursor,targetDow);
     }
     return result;
   },[patient,appointments]);
@@ -1410,49 +1418,67 @@ function ScheduleEditor({daySchedule,setDaySchedule,onClose}){
 }
 
 // ── AUTO-SCHEDULE HELPER ──────────────────────────────────────────────────────
-// Given a patient with frequency settings and existing appointments,
-// generate all missing future sessions up to N weeks ahead.
 function autoScheduleSessions(patient, appointments, weeksAhead=8){
   const {frequency,preferredDay,preferredTime}=patient;
   if(!frequency||frequency==="none"||preferredDay===undefined||!preferredTime) return [];
   const intervalDays=frequency==="weekly"?7:14;
   const today=getToday();
   const horizon=addDays(today,weeksAhead*7);
+  const targetDow=parseInt(preferredDay);
 
-  // Collect existing confirmed/done dates+times for this patient
+  // Collect all existing (non-cancelled) dates+times for this patient
   const existing=new Set(appointments
     .filter(a=>a.patientId===patient.id&&a.status!=="cancelled")
     .map(a=>a.date+"T"+a.time));
 
-  // Find last appointment date
+  // Find the anchor: last confirmed/done appointment, or today
   const pAppts=appointments
     .filter(a=>a.patientId===patient.id&&(a.status==="confirmed"||a.status==="done"))
     .sort((a,b)=>b.date.localeCompare(a.date));
 
-  let cursor=pAppts.length>0
-    ?new Date(pAppts[0].date+"T12:00:00")
-    :new Date(today+"T12:00:00");
+  // Build a set of all dates that should have sessions, starting from first anchor
+  // Strategy: find the first occurrence of preferredDay on or after max(today, lastAppt)
+  // then generate every intervalDays forward until horizon
+  const anchorBase = pAppts.length>0
+    ? new Date(pAppts[0].date+"T12:00:00")
+    : new Date(today+"T12:00:00");
+
+  // Find next occurrence of targetDow on or after anchorBase
+  const findNextDow=(base, dow)=>{
+    const d=new Date(base);
+    let tries=0;
+    while(d.getDay()!==dow && tries<14){d.setDate(d.getDate()+1);tries++;}
+    return new Date(d);
+  };
+
+  // If last appt exists, advance one interval from it to get the next expected date
+  let cursor;
+  if(pAppts.length>0){
+    // Start from one interval after the last appointment
+    const next=new Date(anchorBase);
+    next.setDate(next.getDate()+intervalDays);
+    cursor=findNextDow(next, targetDow);
+  } else {
+    // No appointments yet — start from today, find first preferred day
+    cursor=findNextDow(new Date(today+"T12:00:00"), targetDow);
+    // If that date is today itself and today >= today, use it
+  }
 
   const toCreate=[];
-  // Walk forward until horizon
   let safety=0;
   while(safety++<60){
-    cursor.setDate(cursor.getDate()+intervalDays);
     const ds=cursor.toISOString().split("T")[0];
     if(ds>horizon) break;
-    if(ds<today) continue;
-    // Find nearest occurrence of preferredDay on or after cursor
-    let cand=new Date(cursor);
-    let tries=0;
-    while(cand.getDay()!==parseInt(preferredDay)&&tries<14){cand.setDate(cand.getDate()+1);tries++;}
-    const candDs=cand.toISOString().split("T")[0];
-    if(candDs>horizon) break;
-    const key=candDs+"T"+preferredTime;
-    if(!existing.has(key)){
-      toCreate.push({date:candDs,time:preferredTime});
-      existing.add(key); // avoid duplicates in loop
+    if(ds>=today){
+      const key=ds+"T"+preferredTime;
+      if(!existing.has(key)){
+        toCreate.push({date:ds, time:preferredTime});
+        existing.add(key);
+      }
     }
-    cursor=cand;
+    // Advance by interval, then re-align to preferred day
+    cursor.setDate(cursor.getDate()+intervalDays);
+    cursor=findNextDow(cursor, targetDow);
   }
   return toCreate;
 }
@@ -1845,40 +1871,219 @@ function Agenda({data,setData,slotDays,setSlotDays}){
 
 // ── PAGOS ─────────────────────────────────────────────────────────────────────
 function Pagos({data,setData}){
-  const {payments,patients}=data;
+  const {payments,patients,appointments}=data;
+  const today=getToday();
   const [modal,setModal]=useState(false);
-  const [month,setMonth]=useState(TODAY.slice(0,7));
-  const [form,setForm]=useState({patientId:"",amount:String(DEFAULT_FEE),method:"efectivo",concept:"",date:TODAY});
+  const [tab,setTab]=useState("resumen"); // "resumen" | "detalle" | "pendientes"
+  const [month,setMonth]=useState(()=>today.slice(0,7));
+  const [form,setForm]=useState({patientId:"",amount:String(DEFAULT_FEE),method:"efectivo",concept:"",date:today});
+
+  // Previous month for comparison
+  const prevMonth=useMemo(()=>{
+    const [y,m]=month.split("-").map(Number);
+    const pm=m===1?12:m-1;
+    const py=m===1?y-1:y;
+    return `${py}-${String(pm).padStart(2,"0")}`;
+  },[month]);
+
   const fil=payments.filter(p=>p.date.startsWith(month));
+  const filPrev=payments.filter(p=>p.date.startsWith(prevMonth));
   const paid=fil.filter(p=>p.status==="paid").reduce((s,p)=>s+p.amount,0);
+  const paidPrev=filPrev.filter(p=>p.status==="paid").reduce((s,p)=>s+p.amount,0);
   const pend=fil.filter(p=>p.status==="pending").reduce((s,p)=>s+p.amount,0);
   const efec=fil.filter(p=>p.method==="efectivo"&&p.status==="paid").reduce((s,p)=>s+p.amount,0);
   const dig=fil.filter(p=>p.method==="digital"&&p.status==="paid").reduce((s,p)=>s+p.amount,0);
-  const add=()=>{const p=patients.find(p=>p.id===parseInt(form.patientId));if(!p)return;setData(d=>({...d,payments:[...d.payments,{id:Date.now(),patientId:p.id,patientName:p.name,date:form.date,amount:parseInt(form.amount),method:form.method,concept:form.concept||"Pago",status:"paid"}]}));setModal(false);setForm({patientId:"",amount:String(DEFAULT_FEE),method:"efectivo",concept:"",date:TODAY});};
+  const diff=paid-paidPrev;
+  const diffPct=paidPrev>0?Math.round((diff/paidPrev)*100):null;
+
+  // All-time pending by patient
+  const pendingByPatient=useMemo(()=>{
+    const byPat={};
+    payments.filter(p=>p.status==="pending").forEach(p=>{
+      if(!byPat[p.patientId])byPat[p.patientId]={name:p.patientName,total:0,count:0};
+      byPat[p.patientId].total+=p.amount;
+      byPat[p.patientId].count++;
+    });
+    return Object.values(byPat).sort((a,b)=>b.total-a.total);
+  },[payments]);
+
+  const totalPending=payments.filter(p=>p.status==="pending").reduce((s,p)=>s+p.amount,0);
+
+  const add=()=>{
+    const p=patients.find(p=>p.id===parseInt(form.patientId));if(!p)return;
+    setData(d=>({...d,payments:[...d.payments,{id:Date.now(),patientId:p.id,patientName:p.name,date:form.date,amount:parseInt(form.amount),method:form.method,concept:form.concept||"Pago",status:"paid"}]}));
+    setModal(false);
+    setForm({patientId:"",amount:String(DEFAULT_FEE),method:"efectivo",concept:"",date:today});
+  };
+
+  const markPaid=(id,method)=>setData(d=>({...d,payments:d.payments.map(p=>p.id===id?{...p,status:"paid",method:method||p.method}:p)}));
+  const deletePayment=(id)=>{if(!confirm("¿Eliminar este pago?"))return;setData(d=>({...d,payments:d.payments.filter(p=>p.id!==id)}));};
+
   const MC={efectivo:C.green,digital:C.accent,pendiente:C.yellow};
-  const ML={efectivo:"Efectivo",digital:"Digital",pendiente:"Pendiente"};
+  const ML={efectivo:"💵 Efectivo",digital:"📱 Digital",pendiente:"⏳ Pendiente"};
+
   return (
     <div className="fi">
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
-        <div><h2 style={{fontFamily:"Fraunces",fontSize:22,fontWeight:400}}>Pagos</h2><p style={{color:C.muted,fontSize:13}}>Control de ingresos</p></div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+        <div><h2 style={{fontFamily:"Fraunces",fontSize:22,fontWeight:400}}>Pagos</h2>
+          <p style={{color:C.muted,fontSize:13}}>Control de ingresos</p>
+        </div>
         <Btn onClick={()=>setModal(true)}>+ Registrar</Btn>
       </div>
-      <div style={{display:"flex",gap:10,marginBottom:10}}><Stat label="Cobrado" value={`$${paid.toLocaleString()}`} sub={`${fil.filter(p=>p.status==="paid").length} pagos`} color={C.green}/><Stat label="Por cobrar" value={`$${pend.toLocaleString()}`} color={C.yellow}/></div>
-      <div style={{display:"flex",gap:10,marginBottom:16}}><Stat label="💵 Efectivo" value={`$${efec.toLocaleString()}`}/><Stat label="📱 Digital" value={`$${dig.toLocaleString()}`}/></div>
-      <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:12}}>
-        <label style={{fontSize:12,color:C.muted}}>Mes:</label>
-        <input type="month" value={month} onChange={e=>setMonth(e.target.value)} style={{background:C.card,color:C.text,border:`1px solid ${C.border}`,borderRadius:8,padding:"6px 10px",fontSize:12}}/>
-      </div>
-      <div style={{display:"flex",flexDirection:"column",gap:8}}>
-        {fil.length===0?<Card style={{textAlign:"center",padding:32,color:C.muted}}>Sin registros este mes</Card>
-        :[...fil].sort((a,b)=>b.date.localeCompare(a.date)).map(p=>(
-          <Card key={p.id} style={{display:"flex",alignItems:"center",gap:10,padding:"12px 14px"}}>
-            <div style={{flex:1}}><div style={{fontSize:13,fontWeight:500}}>{p.patientName}</div><div style={{fontSize:11,color:C.muted}}>{p.concept} · {p.date}</div></div>
-            <Badge color={MC[p.method]}>{ML[p.method]}</Badge>
-            <div style={{fontSize:14,fontWeight:600,color:p.status==="paid"?C.green:C.yellow}}>${p.amount.toLocaleString()}</div>
-          </Card>
+
+      {/* Tabs */}
+      <div style={{display:"flex",gap:6,marginBottom:14}}>
+        {[{id:"resumen",l:"Resumen"},{id:"detalle",l:"Detalle"},{id:"pendientes",l:`Pendientes${pendingByPatient.length>0?` (${pendingByPatient.length})`:""`}]}.map(t=>(
+          <button key={t.id} onClick={()=>setTab(t.id)}
+            style={{padding:"6px 14px",borderRadius:20,border:`1px solid ${tab===t.id?C.accent:C.border}`,background:tab===t.id?C.accent:"transparent",color:tab===t.id?"#fff":C.muted,fontSize:12,fontWeight:500}}>
+            {t.l}
+          </button>
         ))}
       </div>
+
+      {/* ── RESUMEN ── */}
+      {tab==="resumen"&&(
+        <>
+          {/* Month picker */}
+          <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:14}}>
+            <label style={{fontSize:12,color:C.muted}}>Mes:</label>
+            <input type="month" value={month} onChange={e=>setMonth(e.target.value)}
+              style={{background:C.card,color:C.text,border:`1px solid ${C.border}`,borderRadius:8,padding:"6px 10px",fontSize:12}}/>
+          </div>
+
+          {/* Stats row */}
+          <div style={{display:"flex",gap:10,marginBottom:10}}>
+            <Stat label="Cobrado" value={`$${paid.toLocaleString()}`} sub={`${fil.filter(p=>p.status==="paid").length} pagos`} color={C.green}/>
+            <Stat label="Por cobrar" value={`$${pend.toLocaleString()}`} color={pend>0?C.yellow:C.muted}/>
+          </div>
+          <div style={{display:"flex",gap:10,marginBottom:12}}>
+            <Stat label="💵 Efectivo" value={`$${efec.toLocaleString()}`}/>
+            <Stat label="📱 Digital" value={`$${dig.toLocaleString()}`}/>
+          </div>
+
+          {/* Month comparison */}
+          {paidPrev>0&&(
+            <Card style={{marginBottom:14,padding:"12px 14px"}}>
+              <div style={{fontSize:11,color:C.muted,marginBottom:6}}>VS MES ANTERIOR (${paidPrev.toLocaleString()})</div>
+              <div style={{display:"flex",alignItems:"center",gap:8}}>
+                <span style={{fontSize:18,fontWeight:700,color:diff>=0?C.green:C.red}}>
+                  {diff>=0?"▲":"▼"} ${Math.abs(diff).toLocaleString()}
+                </span>
+                {diffPct!==null&&<Badge color={diff>=0?C.green:C.red}>{diff>=0?"+":""}{diffPct}%</Badge>}
+              </div>
+            </Card>
+          )}
+
+          {/* Payment list for month */}
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            {fil.length===0
+              ?<Card style={{textAlign:"center",padding:32,color:C.muted}}>Sin registros este mes</Card>
+              :[...fil].sort((a,b)=>b.date.localeCompare(a.date)).map(p=>(
+                <Card key={p.id} style={{padding:"11px 14px"}}>
+                  <div style={{display:"flex",alignItems:"center",gap:10}}>
+                    <div style={{flex:1}}>
+                      <div style={{fontSize:13,fontWeight:500}}>{p.patientName}</div>
+                      <div style={{fontSize:11,color:C.muted}}>{p.concept} · {p.date}</div>
+                    </div>
+                    <Badge color={MC[p.method||"pendiente"]}>{ML[p.method||"pendiente"]}</Badge>
+                    <div style={{fontSize:14,fontWeight:600,color:p.status==="paid"?C.green:C.yellow}}>${p.amount.toLocaleString()}</div>
+                    <button onClick={()=>deletePayment(p.id)} style={{background:"none",border:"none",color:C.muted,fontSize:14,padding:"2px 4px",flexShrink:0}}>✕</button>
+                  </div>
+                  {p.status==="pending"&&(
+                    <div style={{display:"flex",gap:6,marginTop:8}}>
+                      <button onClick={()=>markPaid(p.id,"efectivo")}
+                        style={{flex:1,background:C.green+"18",border:`1px solid ${C.green}44`,borderRadius:8,color:C.green,fontSize:11,fontWeight:600,padding:"5px 0"}}>
+                        💵 Cobrar efectivo
+                      </button>
+                      <button onClick={()=>markPaid(p.id,"digital")}
+                        style={{flex:1,background:C.accent+"18",border:`1px solid ${C.accent}44`,borderRadius:8,color:C.al,fontSize:11,fontWeight:600,padding:"5px 0"}}>
+                        📱 Cobrar digital
+                      </button>
+                    </div>
+                  )}
+                </Card>
+              ))
+            }
+          </div>
+        </>
+      )}
+
+      {/* ── DETALLE ── */}
+      {tab==="detalle"&&(
+        <>
+          <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:14}}>
+            <label style={{fontSize:12,color:C.muted}}>Mes:</label>
+            <input type="month" value={month} onChange={e=>setMonth(e.target.value)}
+              style={{background:C.card,color:C.text,border:`1px solid ${C.border}`,borderRadius:8,padding:"6px 10px",fontSize:12}}/>
+          </div>
+          {/* Per-patient summary for month */}
+          {(()=>{
+            const byPat={};
+            fil.forEach(p=>{
+              if(!byPat[p.patientId])byPat[p.patientId]={name:p.patientName,paid:0,pending:0,efec:0,dig:0,count:0};
+              if(p.status==="paid"){byPat[p.patientId].paid+=p.amount;if(p.method==="efectivo")byPat[p.patientId].efec+=p.amount;else byPat[p.patientId].dig+=p.amount;}
+              else byPat[p.patientId].pending+=p.amount;
+              byPat[p.patientId].count++;
+            });
+            const rows=Object.values(byPat).sort((a,b)=>b.paid-a.paid);
+            return rows.length===0
+              ?<Card style={{textAlign:"center",padding:32,color:C.muted}}>Sin registros este mes</Card>
+              :rows.map((r,i)=>(
+                <Card key={i} style={{marginBottom:8,padding:"12px 14px"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                    <div style={{fontWeight:600,fontSize:14}}>{r.name}</div>
+                    <div style={{fontSize:15,fontWeight:700,color:C.green}}>${r.paid.toLocaleString()}</div>
+                  </div>
+                  <div style={{display:"flex",gap:10}}>
+                    {r.efec>0&&<span style={{fontSize:11,color:C.green}}>💵 ${r.efec.toLocaleString()}</span>}
+                    {r.dig>0&&<span style={{fontSize:11,color:C.al}}>📱 ${r.dig.toLocaleString()}</span>}
+                    {r.pending>0&&<span style={{fontSize:11,color:C.yellow}}>⏳ ${r.pending.toLocaleString()} pend.</span>}
+                    <span style={{fontSize:11,color:C.muted,marginLeft:"auto"}}>{r.count} pago{r.count!==1?"s":""}</span>
+                  </div>
+                </Card>
+              ));
+          })()}
+        </>
+      )}
+
+      {/* ── PENDIENTES ── */}
+      {tab==="pendientes"&&(
+        <>
+          <Card style={{marginBottom:14,background:`linear-gradient(135deg,${C.yellow}0a,${C.card})`}}>
+            <div style={{fontSize:11,color:C.muted,marginBottom:4}}>TOTAL PENDIENTE DE COBRO</div>
+            <div style={{fontSize:28,fontWeight:700,color:totalPending>0?C.yellow:C.muted,fontFamily:"Fraunces"}}>${totalPending.toLocaleString()}</div>
+          </Card>
+          {pendingByPatient.length===0
+            ?<Card style={{textAlign:"center",padding:32,color:C.green}}>✓ Sin cobros pendientes</Card>
+            :pendingByPatient.map((p,i)=>{
+              const pending=payments.filter(pay=>pay.patientId===Object.keys(data.patients.reduce((acc,pt)=>{acc[pt.id]=pt;return acc;},{})).find(id=>data.patients.find(pt=>pt.id===parseInt(id)&&pt.name===p.name))&&pay.status==="pending");
+              const patientPays=payments.filter(pay=>pay.patientName===p.name&&pay.status==="pending");
+              return (
+                <Card key={i} style={{marginBottom:8,borderColor:C.yellow+"44"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:patientPays.length>0?10:0}}>
+                    <div><div style={{fontWeight:600,fontSize:14}}>{p.name}</div><div style={{fontSize:11,color:C.muted}}>{p.count} cobro{p.count!==1?"s":""} pendiente{p.count!==1?"s":""}</div></div>
+                    <div style={{fontSize:16,fontWeight:700,color:C.yellow}}>${p.total.toLocaleString()}</div>
+                  </div>
+                  {patientPays.length>0&&(
+                    <div style={{display:"flex",gap:6}}>
+                      <button onClick={()=>{patientPays.forEach(pay=>markPaid(pay.id,"efectivo"));}}
+                        style={{flex:1,background:C.green+"18",border:`1px solid ${C.green}44`,borderRadius:8,color:C.green,fontSize:11,fontWeight:600,padding:"7px 0"}}>
+                        💵 Cobrar todo efectivo
+                      </button>
+                      <button onClick={()=>{patientPays.forEach(pay=>markPaid(pay.id,"digital"));}}
+                        style={{flex:1,background:C.accent+"18",border:`1px solid ${C.accent}44`,borderRadius:8,color:C.al,fontSize:11,fontWeight:600,padding:"7px 0"}}>
+                        📱 Cobrar todo digital
+                      </button>
+                    </div>
+                  )}
+                </Card>
+              );
+            })
+          }
+        </>
+      )}
+
+      {/* ── Modal registrar pago ── */}
       {modal&&(
         <Sheet onClose={()=>setModal(false)} title="Registrar Pago">
           <div style={{display:"flex",flexDirection:"column",gap:14}}>
