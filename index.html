@@ -169,7 +169,7 @@ function useNotifications(data, setData){
         }
       }
     };
-    const t=setInterval(check,60_000);
+    const t=setInterval(check,60000);
     check();
     return()=>clearInterval(t);
   },[data.appointments,prompt]);
@@ -271,7 +271,7 @@ const C={bg:"#0f1117",surface:"#181c27",card:"#1e2235",border:"#2a3050",
   accent:"#6c8fff",al:"#8facff",green:"#4ecb8b",yellow:"#f5c842",red:"#ff6b6b",text:"#e8eaf6",muted:"#7b83a6"};
 
 // ── STORAGE ──────────────────────────────────────────────────────────────────
-const SK="sonia_v14";
+const SK="sonia_v15";
 const SEED={
   therapist:{name:"",specialty:"Psicología Clínica",cedula:"",address:"",phone:"",email:"",
     payments:[{id:1,label:"CLABE",value:""},{id:2,label:"Mercado Pago",value:""}]},
@@ -2105,6 +2105,75 @@ function Pagos({data,setData}){
   );
 }
 
+// ── BACKUP CARD ───────────────────────────────────────────────────────────────
+function BackupCard({data, setData}){
+  const [importError,setImportError]=useState("");
+  const [importOk,setImportOk]=useState(false);
+
+  const exportBackup=()=>{
+    const payload=JSON.stringify(data,null,2);
+    const blob=new Blob([payload],{type:"application/json"});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement("a");
+    const dateStr=new Date().toISOString().slice(0,10);
+    a.href=url;
+    a.download="sonia-backup-"+dateStr+".json";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const importBackup=(e)=>{
+    const file=e.target.files&&e.target.files[0];
+    if(!file)return;
+    setImportError("");setImportOk(false);
+    const reader=new FileReader();
+    reader.onload=evt=>{
+      try{
+        const parsed=JSON.parse(evt.target.result);
+        if(!parsed.patients||!parsed.appointments||!parsed.payments){
+          setImportError("Archivo inválido — no parece un backup de Sonia.");
+          return;
+        }
+        if(!confirm("¿Restaurar backup?\n\n"+parsed.patients.length+" pacientes, "+parsed.appointments.length+" citas, "+parsed.payments.length+" pagos.\n\nTus datos actuales se perderán."))return;
+        setData({...SEED,...parsed});
+        setImportOk(true);
+        setTimeout(()=>setImportOk(false),4000);
+      }catch(err){
+        setImportError("No se pudo leer el archivo. ¿Es un JSON válido?");
+      }
+    };
+    reader.readAsText(file);
+    e.target.value="";
+  };
+
+  const stats=data.patients.length+" pac · "+data.appointments.length+" citas · "+data.payments.length+" pagos";
+
+  return (
+    <Card style={{marginBottom:14,borderColor:C.green+"44"}}>
+      <div style={{fontSize:11,fontWeight:600,color:C.muted,textTransform:"uppercase",letterSpacing:.5,marginBottom:12}}>💾 Backup y restauración</div>
+      <div style={{fontSize:12,color:C.muted,lineHeight:1.6,marginBottom:14}}>
+        Los datos se guardan solo en este teléfono. Exportá antes de reinstalar o cambiar de dispositivo.
+      </div>
+      <div style={{background:C.bg,borderRadius:8,padding:"8px 12px",fontSize:12,color:C.muted,marginBottom:14}}>
+        Datos actuales: <span style={{color:C.text,fontWeight:500}}>{stats}</span>
+      </div>
+      <button onClick={exportBackup}
+        style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8,width:"100%",background:C.green+"18",border:"1px solid "+C.green+"44",borderRadius:10,padding:"12px 0",color:C.green,fontSize:13,fontWeight:600,cursor:"pointer",marginBottom:10}}>
+        📤 Exportar backup (.json)
+      </button>
+      <label style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8,width:"100%",background:C.accent+"18",border:"1px solid "+C.accent+"44",borderRadius:10,padding:"12px 0",color:C.al,fontSize:13,fontWeight:600,cursor:"pointer"}}>
+        📥 Importar backup
+        <input type="file" accept=".json,application/json" onChange={importBackup} style={{display:"none"}}/>
+      </label>
+      {importOk&&<div style={{marginTop:10,background:C.green+"18",border:"1px solid "+C.green+"44",borderRadius:8,padding:"8px 12px",fontSize:12,color:C.green}}>✓ Datos restaurados correctamente</div>}
+      {importError&&<div style={{marginTop:10,background:C.red+"18",border:"1px solid "+C.red+"44",borderRadius:8,padding:"8px 12px",fontSize:12,color:C.red}}>❌ {importError}</div>}
+      <div style={{marginTop:12,fontSize:11,color:C.muted,lineHeight:1.6}}>
+        💡 <strong style={{color:C.text}}>Para cambiar de dispositivo:</strong> exportá el backup, abrí Sonia en el nuevo teléfono e importá el archivo.
+      </div>
+    </Card>
+  );
+}
+
 // ── PERFIL ────────────────────────────────────────────────────────────────────
 function Perfil({data,setData}){
   const therapist=data.therapist;
@@ -2171,88 +2240,7 @@ function Perfil({data,setData}){
       </Card>
 
       {/* ── BACKUP / RESTORE ── */}
-      {(()=>{
-        const [importError,setImportError]=useState("");
-        const [importOk,setImportOk]=useState(false);
-
-        const exportBackup=()=>{
-          const payload=JSON.stringify(data,null,2);
-          const blob=new Blob([payload],{type:"application/json"});
-          const url=URL.createObjectURL(blob);
-          const a=document.createElement("a");
-          const dateStr=new Date().toISOString().slice(0,10);
-          a.href=url;
-          a.download=`sonia-backup-${dateStr}.json`;
-          a.click();
-          URL.revokeObjectURL(url);
-        };
-
-        const importBackup=(e)=>{
-          const file=e.target.files?.[0];
-          if(!file)return;
-          setImportError("");setImportOk(false);
-          const reader=new FileReader();
-          reader.onload=evt=>{
-            try{
-              const parsed=JSON.parse(evt.target.result);
-              // Basic validation
-              if(!parsed.patients||!parsed.appointments||!parsed.payments){
-                setImportError("Archivo inválido — no parece un backup de Sonia.");
-                return;
-              }
-              if(!confirm(`¿Restaurar backup?\n\nEsto reemplazará todos tus datos actuales con:\n• ${parsed.patients.length} pacientes\n• ${parsed.appointments.length} citas\n• ${parsed.payments.length} pagos\n\nTus datos actuales se perderán.`))return;
-              setData({...SEED,...parsed});
-              setImportOk(true);
-              setTimeout(()=>setImportOk(false),4000);
-            }catch{
-              setImportError("No se pudo leer el archivo. ¿Es un JSON válido?");
-            }
-          };
-          reader.readAsText(file);
-          e.target.value=""; // reset input
-        };
-
-        const stats=`${data.patients.length} pac · ${data.appointments.length} citas · ${data.payments.length} pagos`;
-
-        return (
-          <Card style={{marginBottom:14,borderColor:C.green+"44"}}>
-            <div style={{fontSize:11,fontWeight:600,color:C.muted,textTransform:"uppercase",letterSpacing:.5,marginBottom:12}}>💾 Backup y restauración</div>
-            <div style={{fontSize:12,color:C.muted,lineHeight:1.6,marginBottom:14}}>
-              Los datos se guardan solo en este teléfono. Exportá un backup antes de reinstalar la app o cambiar de dispositivo.
-            </div>
-            <div style={{background:C.bg,borderRadius:8,padding:"8px 12px",fontSize:12,color:C.muted,marginBottom:14}}>
-              Datos actuales: <span style={{color:C.text,fontWeight:500}}>{stats}</span>
-            </div>
-
-            {/* Export */}
-            <button onClick={exportBackup}
-              style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8,width:"100%",background:C.green+"18",border:`1px solid ${C.green}44`,borderRadius:10,padding:"12px 0",color:C.green,fontSize:13,fontWeight:600,cursor:"pointer",marginBottom:10}}>
-              📤 Exportar backup (.json)
-            </button>
-
-            {/* Import */}
-            <label style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8,width:"100%",background:C.accent+"18",border:`1px solid ${C.accent}44`,borderRadius:10,padding:"12px 0",color:C.al,fontSize:13,fontWeight:600,cursor:"pointer"}}>
-              📥 Importar backup
-              <input type="file" accept=".json,application/json" onChange={importBackup} style={{display:"none"}}/>
-            </label>
-
-            {importOk&&(
-              <div style={{marginTop:10,background:C.green+"18",border:`1px solid ${C.green}44`,borderRadius:8,padding:"8px 12px",fontSize:12,color:C.green}}>
-                ✓ Datos restaurados correctamente
-              </div>
-            )}
-            {importError&&(
-              <div style={{marginTop:10,background:C.red+"18",border:`1px solid ${C.red}44`,borderRadius:8,padding:"8px 12px",fontSize:12,color:C.red}}>
-                ❌ {importError}
-              </div>
-            )}
-
-            <div style={{marginTop:12,fontSize:11,color:C.muted,lineHeight:1.6}}>
-              💡 <strong style={{color:C.text}}>Para cambiar de dispositivo:</strong> exportá el backup, abrí Sonia en el nuevo teléfono, e importá el archivo.
-            </div>
-          </Card>
-        );
-      })()}
+      <BackupCard data={data} setData={setData}/>
 
       <Card>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
