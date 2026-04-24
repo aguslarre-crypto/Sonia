@@ -271,7 +271,7 @@ const C={bg:"#0f1117",surface:"#181c27",card:"#1e2235",border:"#2a3050",
   accent:"#6c8fff",al:"#8facff",green:"#4ecb8b",yellow:"#f5c842",red:"#ff6b6b",text:"#e8eaf6",muted:"#7b83a6"};
 
 // ── STORAGE ──────────────────────────────────────────────────────────────────
-const SK="sonia_v13";
+const SK="sonia_v14";
 const SEED={
   therapist:{name:"",specialty:"Psicología Clínica",cedula:"",address:"",phone:"",email:"",
     payments:[{id:1,label:"CLABE",value:""},{id:2,label:"Mercado Pago",value:""}]},
@@ -1933,7 +1933,7 @@ function Pagos({data,setData}){
 
       {/* Tabs */}
       <div style={{display:"flex",gap:6,marginBottom:14}}>
-        {[{id:"resumen",l:"Resumen"},{id:"detalle",l:"Detalle"},{id:"pendientes",l:`Pendientes${pendingByPatient.length>0?` (${pendingByPatient.length})`:""`}]}.map(t=>(
+        {[{id:"resumen",l:"Resumen"},{id:"detalle",l:"Detalle"},{id:"pendientes",l:"Pendientes"+(pendingByPatient.length>0?" ("+pendingByPatient.length+")":"")}].map(t=>(
           <button key={t.id} onClick={()=>setTab(t.id)}
             style={{padding:"6px 14px",borderRadius:20,border:`1px solid ${tab===t.id?C.accent:C.border}`,background:tab===t.id?C.accent:"transparent",color:tab===t.id?"#fff":C.muted,fontSize:12,fontWeight:500}}>
             {t.l}
