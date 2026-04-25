@@ -48,11 +48,11 @@ button{cursor:pointer;font-family:'DM Sans',sans-serif;-webkit-appearance:none;b
 const {useState,useEffect,useRef,useCallback,useMemo} = React;
 
 // ── CONSTANTS ────────────────────────────────────────────────────────────────
-// Half-hour slots 07:00–20:00
-const WORK_SLOTS = Array.from({length:27},(_,i)=>{
+// Half-hour slots 07:00–22:00
+const WORK_SLOTS = Array.from({length:31},(_,i)=>{
   const h=Math.floor(i/2)+7, m=i%2===0?"00":"30";
-  return `${String(h).padStart(2,"0")}:${m}`;
-}); // 07:00,07:30,...,19:30,20:00
+  return String(h).padStart(2,"0")+":"+m;
+}); // 07:00,07:30,...,21:30,22:00
 const WORK_HOURS = WORK_SLOTS; // alias for backward compat
 const DEFAULT_FEE = 2000;
 // TODAY is a function so it's always current (not frozen at page load)
@@ -289,7 +289,7 @@ const C={bg:"#0f1117",surface:"#181c27",card:"#1e2235",border:"#2a3050",
   accent:"#6c8fff",al:"#8facff",green:"#4ecb8b",yellow:"#f5c842",red:"#ff6b6b",text:"#e8eaf6",muted:"#7b83a6"};
 
 // ── STORAGE ──────────────────────────────────────────────────────────────────
-const SK="sonia_v16";
+const SK="sonia_v17";
 const SEED={
   therapist:{name:"",specialty:"Psicología Clínica",cedula:"",address:"",phone:"",email:"",
     payments:[{id:1,label:"CLABE",value:""},{id:2,label:"Mercado Pago",value:""}]},
@@ -356,55 +356,103 @@ function useVoice(onResult){
   const recRef=useRef(null);
   const permOk=useRef(false);
 
-  const flash=useCallback(msg=>{setStatus(msg);setTimeout(()=>setStatus(""),4500);},[]);
+  const flash=useCallback(msg=>{setStatus(msg);setTimeout(()=>setStatus(""),5000);},[]);
   const speak=useCallback(txt=>{
     if(!window.speechSynthesis)return;
     window.speechSynthesis.cancel();
     const u=new SpeechSynthesisUtterance(txt);
-    u.lang="es-ES";u.rate=1.05;
-    setTimeout(()=>window.speechSynthesis.speak(u),80);
+    // Try Spanish, fall back to device default
+    u.lang="es-MX";u.rate=1.0;u.volume=1;
+    setTimeout(()=>window.speechSynthesis.speak(u),100);
   },[]);
 
   const doRecognize=useCallback(()=>{
     const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
-    if(!SR){flash("⚠ Reconocimiento de voz no disponible en este navegador");return;}
-    if(recRef.current){try{recRef.current.abort();}catch{}}
+    if(!SR){
+      flash("⚠ Tu navegador no soporta reconocimiento de voz. Usa Chrome en Android.");
+      return;
+    }
+    if(recRef.current){try{recRef.current.stop();}catch{}}
+
     const r=new SR();
-    r.lang="es-ES";r.continuous=false;r.interimResults=false;r.maxAlternatives=5;
-    r.onstart=()=>setListening(true);
+    // Use device language first, then Spanish — this fixes Android not recognizing es-ES
+    r.lang="";               // empty = use device default (most reliable on Android)
+    r.continuous=false;
+    r.interimResults=false;
+    r.maxAlternatives=8;    // get more alternatives to try
+
+    r.onstart=()=>{setListening(true);flash("🎤 Escuchando...");};
+
     r.onresult=e=>{
       setListening(false);
-      const txt=e.results[0][0].transcript;
-      flash(`🎤 "${txt}"`);
-      onResult(txt,speak,flash);
+      // Try all alternatives until one matches a command
+      const alternatives=[];
+      for(let i=0;i<e.results[0].length;i++){
+        alternatives.push(e.results[0][i].transcript);
+      }
+      flash("🎤 "+alternatives[0]);
+      // Pass all alternatives; processor tries each one
+      onResult(alternatives,speak,flash);
     };
+
+    r.onnomatch=()=>{
+      setListening(false);
+      flash("🎤 No reconocí el comando, intenta de nuevo");
+    };
+
     r.onerror=e=>{
       setListening(false);
-      const msgs={"not-allowed":"❌ Permiso de micrófono denegado — ve a Configuración del sitio en Chrome","no-speech":"Sin audio, intenta de nuevo","network":"Sin conexión para reconocimiento","aborted":""};
-      if(msgs[e.error]!==undefined)flash(msgs[e.error]);
-      else flash(`❌ Error de micrófono: ${e.error}`);
+      const msgs={
+        "not-allowed":"❌ Micrófono bloqueado. Toca el candado 🔒 en Chrome → Permisos → Micrófono → Permitir",
+        "no-speech":"Sin audio detectado — hablá más cerca del micrófono",
+        "network":"Sin conexión para reconocimiento de voz",
+        "service-not-allowed":"❌ Servicio de voz no disponible. Verificá que Chrome tenga acceso a internet.",
+        "aborted":"",
+        "audio-capture":"❌ No se detectó micrófono en este dispositivo",
+      };
+      const msg=msgs[e.error];
+      if(msg!==undefined&&msg!=="") flash(msg);
+      else if(msg===undefined) flash("❌ Error de voz: "+e.error);
     };
+
     r.onend=()=>setListening(false);
     recRef.current=r;
-    try{r.start();}catch(err){flash("❌ No se pudo iniciar: "+err.message);}
+
+    try{r.start();}
+    catch(err){
+      setListening(false);
+      flash("❌ No se pudo iniciar el micrófono: "+err.message);
+    }
   },[onResult,flash]);
 
   const start=useCallback(()=>{
-    if(listening){try{recRef.current?.abort();}catch{}setListening(false);return;}
-    if(!permOk.current&&navigator.mediaDevices?.getUserMedia){
-      flash("🎙 Solicitando permiso de micrófono...");
-      navigator.mediaDevices.getUserMedia({audio:true,video:false})
-        .then(stream=>{
-          stream.getTracks().forEach(t=>t.stop());
-          permOk.current=true;
-          doRecognize();
-        })
-        .catch(err=>{
-          flash(err.name==="NotAllowedError"
-            ?"❌ Micrófono bloqueado — toca el candado 🔒 en la barra de Chrome → Permisos del sitio → Micrófono → Permitir"
-            :"❌ "+err.message);
-        });
+    if(listening){
+      try{recRef.current?.stop();}catch{}
+      setListening(false);
+      return;
+    }
+    // Always request mic permission explicitly first
+    if(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia){
+      if(!permOk.current){
+        flash("🎙 Solicitando permiso de micrófono...");
+        navigator.mediaDevices.getUserMedia({audio:true,video:false})
+          .then(stream=>{
+            stream.getTracks().forEach(t=>t.stop());
+            permOk.current=true;
+            setTimeout(doRecognize,200); // small delay after permission
+          })
+          .catch(err=>{
+            if(err.name==="NotAllowedError"||err.name==="PermissionDeniedError"){
+              flash("❌ Permiso denegado. Toca 🔒 en Chrome → Permisos del sitio → Micrófono → Permitir");
+            } else {
+              flash("❌ "+err.message);
+            }
+          });
+      } else {
+        doRecognize();
+      }
     } else {
+      // No getUserMedia — try directly (some browsers skip it)
       doRecognize();
     }
   },[listening,doRecognize,flash]);
@@ -413,139 +461,170 @@ function useVoice(onResult){
 }
 
 // ── VOICE COMMAND PROCESSOR ──────────────────────────────────────────────────
-function processVoiceCommand(text,dataRef,setData,setTab,speak,flash,setSlotDays){
+// Now receives an array of alternatives and tries each one
+function processVoiceCommand(alternatives,dataRef,setData,setTab,speak,flash,setSlotDays){
+  // Normalize: remove accents, lowercase
   const norm=s=>s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").trim();
-  const t=norm(text);
+
+  // Try to match any alternative
   const {patients,appointments,payments}=dataRef.current;
-  const matchName=hint=>patients.find(p=>norm(p.name).split(" ").some(w=>hint.includes(w)&&w.length>2));
+  const DOW_MAP={
+    lunes:1,martes:2,miercoles:3,jueves:4,viernes:5,sabado:6,domingo:0,
+    lun:1,mar:2,mie:3,mier:3,jue:4,vie:5,sab:6,dom:0,
+    monday:1,tuesday:2,wednesday:3,thursday:4,friday:5,saturday:6,sunday:0,
+  };
 
-  // Day-of-week name → number
-  const DOW_MAP={lunes:1,martes:2,miercoles:3,jueves:4,viernes:5,sabado:6,domingo:0,
-    lun:1,mar:2,mie:3,mier:3,jue:4,vie:5,sab:6,dom:0};
+  // Fuzzy name match: find patient whose name words appear in hint
+  const matchName=hint=>{
+    const hn=norm(hint);
+    // Try exact first, then partial
+    return patients.find(p=>{
+      const pn=norm(p.name);
+      const words=pn.split(" ").filter(w=>w.length>2);
+      return words.some(w=>hn.includes(w));
+    });
+  };
 
-  // NAV
-  if(/(ir a|abrir|ver|mostrar)\s+(pacientes|inicio)/.test(t)){setTab("pacientes");speak("Pacientes");return;}
-  if(/(ir a|abrir|ver|mostrar)\s+agenda/.test(t)){setTab("agenda");speak("Agenda");return;}
-  if(/(ir a|abrir|ver|mostrar)\s+pagos/.test(t)){setTab("pagos");speak("Pagos");return;}
-  if(/(ir a|abrir|ver|mostrar)\s+(chat|asistente|sonia)/.test(t)){setTab("chat");speak("Asistente");return;}
-  if(/(ir a|abrir|ver|mostrar)\s+perfil/.test(t)){setTab("perfil");speak("Perfil");return;}
+  // Try each alternative until we get a match
+  for(const raw of alternatives){
+    const t=norm(raw);
 
-  // ADD NEW PATIENT: "agregar paciente [nombre apellido] [día] a las [hora]"
-  // e.g. "agregar paciente Laura Soto los lunes a las 10"
-  // e.g. "nuevo paciente Marcos Pérez miércoles 11"
-  const newPRx=/(?:agregar|nuevo|añadir)\s+paciente\s+([a-záéíóúñü]+(?:\s+[a-záéíóúñü]+)+?)(?:\s+(?:los?\s+)?([a-záéíóúñü]+))?(?:\s+a\s+las?\s+(\d{1,2})(?::(\d{2}))?)?$/i;
-  const newPM=t.match(newPRx);
-  if(newPM&&(t.includes("paciente")||t.includes("nuevo"))){
-    const fullName=newPM[1].trim().split(" ").map(w=>w.charAt(0).toUpperCase()+w.slice(1)).join(" ");
-    const dayWord=newPM[2]?norm(newPM[2]).replace(/s$/,""):null; // remove trailing 's' (lunes→lune→lun)
-    const dow=dayWord?DOW_MAP[dayWord]??DOW_MAP[dayWord.slice(0,3)]??null:null;
-    const h=newPM[3]?String(parseInt(newPM[3])).padStart(2,"0"):null;
-    const time=h?`${h}:${newPM[4]||"00"}`:null;
+    // ── NAVIGATION ──────────────────────────────────────────────────────────
+    if(/pacientes?|inicio/.test(t)&&/(ir|abrir|ver|mostrar|vamos|lleva|abre)/.test(t)){setTab("pacientes");speak("Pacientes");return;}
+    if(/agenda/.test(t)&&/(ir|abrir|ver|mostrar|vamos|lleva|abre)/.test(t)){setTab("agenda");speak("Agenda");return;}
+    if(/pagos?/.test(t)&&/(ir|abrir|ver|mostrar|vamos|lleva|abre)/.test(t)){setTab("pagos");speak("Pagos");return;}
+    if(/(chat|asistente|sonia)/.test(t)&&/(ir|abrir|ver|mostrar|vamos|lleva|abre)/.test(t)){setTab("chat");speak("Asistente");return;}
+    if(/perfil/.test(t)&&/(ir|abrir|ver|mostrar|vamos|lleva|abre)/.test(t)){setTab("perfil");speak("Perfil");return;}
 
-    // Find the next occurrence of that day of week
-    let apptDate=null;
-    if(dow!==null&&time){
-      const base=new Date(TODAY+"T12:00:00");
-      let tries=0;
-      while(base.getDay()!==dow&&tries<7){base.setDate(base.getDate()+1);tries++;}
-      if(base.getDay()===dow) apptDate=base.toISOString().split("T")[0];
-    }
+    // ── ADD PATIENT: "agregar paciente Laura Soto lunes 10" ─────────────────
+    if(/paciente/.test(t)&&/(agregar|nuevo|añadir|crear|registrar)/.test(t)){
+      // Extract name: everything after "paciente" until a day name or number
+      const afterP=t.replace(/.*paciente\s+/,"");
+      // Split on day names or "a las"
+      const dayKeys=Object.keys(DOW_MAP).join("|");
+      const splitRx=new RegExp("\\s+(?:los?\\s+)?("+dayKeys+")\\s|\\s+a\\s+las?\\s+|\\s+(\\d{1,2})\\s*$");
+      const nameEnd=afterP.search(splitRx);
+      const rawName=nameEnd>0?afterP.slice(0,nameEnd).trim():afterP.trim();
+      const fullName=rawName.split(" ").map(w=>w?w[0].toUpperCase()+w.slice(1):"").join(" ").trim();
+      if(!fullName){flash("❌ No entendí el nombre");continue;}
 
-    // Check if patient already exists
-    const existing=patients.find(p=>norm(p.name)===norm(fullName));
-    if(existing){
-      if(apptDate&&time){
-        setData(d=>({...d,appointments:[...d.appointments,{id:Date.now(),patientId:existing.id,patientName:existing.name,date:apptDate,time,duration:50,status:"confirmed",fee:DEFAULT_FEE}]}));
-        speak(`Cita agendada para ${existing.name.split(" ")[0]}`);flash(`✓ Cita ${existing.name} ${apptDate} ${time}`);
-      }else{
-        speak(`${fullName} ya existe`);flash(`Ya existe: ${fullName}`);
+      // Extract day
+      let dow=null;
+      const dayMatch=t.match(new RegExp("(?:los?\\s+)?("+dayKeys+")"));
+      if(dayMatch) dow=DOW_MAP[dayMatch[1]];
+
+      // Extract time
+      let time=null;
+      const timeMatch=t.match(/(?:a las?|las?)\s*(\d{1,2})(?::(\d{2}))?|(\d{1,2})\s*(?:horas?|hs?)/);
+      if(timeMatch){
+        const h=String(parseInt(timeMatch[1]||timeMatch[3])).padStart(2,"0");
+        const m=timeMatch[2]||"00";
+        time=h+":"+m;
       }
-    }else{
-      const newP={id:Date.now(),name:fullName,phone:"",email:"",since:TODAY};
-      setData(d=>{
-        const updated={...d,patients:[...d.patients,newP]};
+
+      let apptDate=null;
+      if(dow!==null&&time){
+        const base=new Date(getToday()+"T12:00:00");
+        let tries=0;
+        while(base.getDay()!==dow&&tries<7){base.setDate(base.getDate()+1);tries++;}
+        apptDate=base.toISOString().split("T")[0];
+      }
+
+      const existing=patients.find(p=>norm(p.name)===norm(fullName));
+      if(existing){
         if(apptDate&&time){
-          updated.appointments=[...d.appointments,{id:Date.now()+1,patientId:newP.id,patientName:newP.name,date:apptDate,time,duration:50,status:"confirmed",fee:DEFAULT_FEE}];
+          setData(d=>({...d,appointments:[...d.appointments,{id:Date.now(),patientId:existing.id,patientName:existing.name,date:apptDate,time,duration:50,status:"confirmed",fee:DEFAULT_FEE}]}));
+          speak("Cita agendada para "+existing.name.split(" ")[0]);
+          flash("✓ "+existing.name+" · "+apptDate+" "+time);
+        } else {
+          speak(fullName+" ya existe");flash("Ya existe: "+fullName);
         }
-        return updated;
-      });
-      const msg=apptDate&&time
-        ?`Paciente ${fullName} agregado. Cita el ${apptDate} a las ${h}`
-        :`Paciente ${fullName} agregado`;
-      speak(msg);flash(`✓ ${fullName}${apptDate?` · ${apptDate} ${time}`:""}`);setTab("pacientes");
+      } else {
+        const newP={id:Date.now(),name:fullName,phone:"",email:"",since:getToday()};
+        setData(d=>{
+          const u={...d,patients:[...d.patients,newP]};
+          if(apptDate&&time) u.appointments=[...d.appointments,{id:Date.now()+1,patientId:newP.id,patientName:newP.name,date:apptDate,time,duration:50,status:"confirmed",fee:DEFAULT_FEE}];
+          return u;
+        });
+        speak("Paciente "+fullName.split(" ")[0]+" agregado"+(apptDate?" con cita":""));
+        flash("✓ "+fullName+(apptDate?" · "+apptDate+" "+time:""));
+        setTab("pacientes");
+      }
+      return;
     }
-    return;
+
+    // ── FREE SLOTS ──────────────────────────────────────────────────────────
+    if(/horas?\s*(libres?|disponibles?|libres)|disponibilidad|horario\s*libre/.test(t)){
+      const nm=t.match(/(\d+)\s*dias?/);
+      const n=nm?parseInt(nm[1]):7;
+      setTab("agenda");setSlotDays(n);
+      speak("Mostrando horas libres, "+n+" días");flash("🔍 Horas libres: "+n+" días");return;
+    }
+
+    // ── REGISTER PAYMENT ────────────────────────────────────────────────────
+    if(/(cobr|pag[oa]|registr).{0,15}\d/.test(t)||/\d.{0,15}(cobr|pag[oa])/.test(t)){
+      const amtMatch=t.match(/(\d{3,6})/);
+      const amt=amtMatch?parseInt(amtMatch[1]):null;
+      if(amt&&amt>=100){
+        // Try to find patient name before or after the amount
+        const withoutAmt=t.replace(amtMatch[0],"");
+        const p=matchName(withoutAmt)||matchName(t);
+        if(p){
+          setData(d=>({...d,payments:[...d.payments,{id:Date.now(),patientId:p.id,patientName:p.name,date:getToday(),amount:amt,method:"efectivo",concept:"Pago por voz",status:"paid"}]}));
+          speak("$"+amt.toLocaleString()+" de "+p.name.split(" ")[0]+" registrado");
+          flash("✓ $"+amt.toLocaleString()+" — "+p.name);setTab("pagos");return;
+        }
+      }
+    }
+
+    // ── BOOK APPOINTMENT ────────────────────────────────────────────────────
+    if(/(agendar|cita|sesion|programar|nueva?\s+cita)/.test(t)){
+      const p=matchName(t);
+      const timeMatch=t.match(/(?:a las?|las?)\s*(\d{1,2})(?::(\d{2}))?/);
+      if(p){
+        const h=timeMatch?String(parseInt(timeMatch[1])).padStart(2,"0"):"10";
+        const m=timeMatch&&timeMatch[2]?timeMatch[2]:"00";
+        const time=h+":"+m;
+        setData(d=>({...d,appointments:[...d.appointments,{id:Date.now(),patientId:p.id,patientName:p.name,date:getToday(),time,duration:50,status:"confirmed",fee:DEFAULT_FEE}]}));
+        speak("Cita para "+p.name.split(" ")[0]+" a las "+h);
+        flash("✓ "+p.name+" · "+time);setTab("agenda");return;
+      }
+    }
+
+    // ── MARK DONE ───────────────────────────────────────────────────────────
+    if(/(realiz|complet|termin|hecha?|done)/.test(t)){
+      const p=matchName(t);
+      const appt=p&&[...appointments].reverse().find(a=>a.status==="confirmed"&&a.patientId===p.id);
+      if(appt){
+        setData(d=>({...d,appointments:d.appointments.map(a=>a.id===appt.id?{...a,status:"done"}:a)}));
+        speak("Sesión de "+appt.patientName.split(" ")[0]+" marcada");
+        flash("✓ Realizada — "+appt.patientName);return;
+      }
+    }
+
+    // ── QUERIES ─────────────────────────────────────────────────────────────
+    if(/(pendiente|cobrar|saldo|debo|deben)/.test(t)){
+      const total=payments.filter(p=>p.status==="pending").reduce((s,p)=>s+p.amount,0);
+      speak(total>0?total.toLocaleString()+" pesos pendientes":"Sin cobros pendientes");
+      flash("Pendiente: $"+total.toLocaleString());return;
+    }
+    if(/(citas?|sesiones?).{0,10}(hoy|dia|d[ií]a)|hoy.{0,10}(citas?|sesiones?)/.test(t)){
+      const n=appointments.filter(a=>a.date===getToday()).length;
+      speak(n+" cita"+(n!==1?"s":" ")+"hoy");flash("Citas hoy: "+n);return;
+    }
+    if(/(cu[aá]ntos?|total|cuantos?).{0,15}pacientes?/.test(t)){
+      speak(patients.length+" pacientes");flash("Pacientes: "+patients.length);return;
+    }
   }
 
-  // FREE SLOTS
-  const slotM=t.match(/(?:buscar|mostrar|ver|busca|muestra)\s+(?:horas?\s+libres?|disponibilidad)(?:.*?(\d+)\s*dias?)?/);
-  if(slotM){
-    const n=slotM[1]?parseInt(slotM[1]):7;
-    setTab("agenda");setSlotDays(n);
-    speak(`Horas libres, ${n} días`);flash(`🔍 Disponibilidad: ${n} días`);return;
-  }
-  if(/horas?\s+libres?|disponibilidad|horario\s+libre/.test(t)){
-    const n=t.includes("mañana")?2:t.includes("semana")?7:5;
-    setTab("agenda");setSlotDays(n);speak("Mostrando disponibilidad");flash("🔍 Horas libres");return;
-  }
-
-  // REGISTER PAYMENT
-  const payM=t.match(/(?:cobr|pago|registr)\S*\s+(?:de\s+|a\s+)?([a-z\s]+?)\s+([\d]+)/i);
-  if(payM){
-    const p=matchName(payM[1].trim());
-    const amt=parseInt(payM[2]);
-    if(p&&amt>0){
-      setData(d=>({...d,payments:[...d.payments,{id:Date.now(),patientId:p.id,patientName:p.name,date:TODAY,amount:amt,method:"efectivo",concept:"Pago por voz",status:"paid"}]}));
-      speak(`${amt} pesos de ${p.name.split(" ")[0]} registrados`);flash(`✓ $${amt.toLocaleString()} — ${p.name}`);setTab("pagos");
-    }else if(!p){speak("No encontré ese paciente");flash("❌ Paciente no encontrado");}
-    else{speak("Monto inválido");flash("❌ Monto inválido");}
-    return;
-  }
-
-  // NEW APPOINTMENT (existing patient)
-  const apM=t.match(/(?:agendar|crear|nueva|programar)\s+(?:una\s+)?(?:cita|sesion)\s+(?:para|con)\s+([a-z\s]+?)(?:\s+a\s+las?\s+(\d{1,2})(?::(\d{2}))?)?$/i);
-  if(apM){
-    const p=matchName((apM[1]||"").trim());
-    if(p){
-      const h=apM[2]?String(parseInt(apM[2])).padStart(2,"0"):"10";
-      const time=`${h}:${apM[3]||"00"}`;
-      setData(d=>({...d,appointments:[...d.appointments,{id:Date.now(),patientId:p.id,patientName:p.name,date:TODAY,time,duration:50,status:"confirmed",fee:DEFAULT_FEE}]}));
-      speak(`Cita para ${p.name.split(" ")[0]} a las ${h}`);flash(`✓ Cita ${p.name.split(" ")[0]} ${time}`);setTab("agenda");
-    }else{speak("No encontré ese paciente");flash("❌ Paciente no encontrado");}
-    return;
-  }
-
-  // MARK DONE
-  const doneM=t.match(/(?:marcar|completar|terminar)\s+(?:sesion|cita)?\s*(?:de|con)?\s*([a-z\s]+?)(?:\s+como\s+)?(?:realizada|hecha|completada)?$/i);
-  if(doneM&&(t.includes("realiz")||t.includes("hecha")||t.includes("complet")||t.includes("marcar")||t.includes("terminar"))){
-    const hint=norm(doneM[1]);
-    const appt=[...appointments].reverse().find(a=>a.status==="confirmed"&&norm(a.patientName).split(" ").some(w=>hint.includes(w)&&w.length>2));
-    if(appt){
-      setData(d=>({...d,appointments:d.appointments.map(a=>a.id===appt.id?{...a,status:"done"}:a)}));
-      speak(`Sesión de ${appt.patientName.split(" ")[0]} completada`);flash(`✓ Realizada — ${appt.patientName}`);
-    }else{speak("No encontré esa cita");flash("❌ Cita no encontrada");}
-    return;
-  }
-
-  // QUERIES
-  if(/(pendiente|cobrar|saldo)/.test(t)){
-    const total=payments.filter(p=>p.status==="pending").reduce((s,p)=>s+p.amount,0);
-    speak(total>0?`${total.toLocaleString()} pesos pendientes`:"Sin cobros pendientes");flash(`Pendiente: $${total.toLocaleString()}`);return;
-  }
-  if(/(citas|sesiones).*(hoy)|hoy.*(citas|sesiones)/.test(t)){
-    const n=appointments.filter(a=>a.date===TODAY).length;
-    speak(`${n} cita${n!==1?"s":""} hoy`);flash(`Citas hoy: ${n}`);return;
-  }
-  if(/(cuantos|total).*(pacientes)/.test(t)){
-    speak(`${patients.length} pacientes`);flash(`Pacientes: ${patients.length}`);return;
-  }
-
-  speak("No entendí, intenta de nuevo");flash("¿? No reconocido");
+  // No command matched across all alternatives
+  flash("¿? No reconocí: \""+alternatives[0]+"\" — intentá con: ir a agenda, registrar pago, agendar cita...");
+  speak("No entendí el comando");
 }
 
 // ── MIC BUTTON ────────────────────────────────────────────────────────────────
 function MicButton({dataRef,setData,setTab,setSlotDays}){
-  const onResult=useCallback((txt,speak,flash)=>processVoiceCommand(txt,dataRef,setData,setTab,speak,flash,setSlotDays),[dataRef,setData,setTab,setSlotDays]);
+  const onResult=useCallback((alternatives,speak,flash)=>processVoiceCommand(alternatives,dataRef,setData,setTab,speak,flash,setSlotDays),[dataRef,setData,setTab,setSlotDays]);
   const {listening,status,start}=useVoice(onResult);
   return (
     <div style={{position:"fixed",bottom:82,right:14,zIndex:90,display:"flex",flexDirection:"column",alignItems:"flex-end",gap:8}}>
@@ -665,7 +744,7 @@ function Chatbot({dataRef,setData,setTab}){
   const apiKey=dataRef.current.apiKey||"";
   const hasKey=apiKey.startsWith("sk-ant-");
 
-  const onVoiceResult=useCallback((txt,speak,flash)=>{setInput(txt);flash(`🎤 "${txt}"`);setTimeout(()=>inputRef.current?.focus(),100);},[]);
+  const onVoiceResult=useCallback((alternatives,speak,flash)=>{const txt=alternatives[0]||"";setInput(txt);flash("🎤 \""+txt+"\"");setTimeout(()=>inputRef.current?.focus(),100);},[]);
   const {listening:micActive,start:startMic,status:micStatus}=useVoice(onVoiceResult);
 
   useEffect(()=>{bottomRef.current?.scrollIntoView({behavior:"smooth"});},[msgs,loading]);
@@ -1890,17 +1969,19 @@ function Agenda({data,setData,slotDays,setSlotDays}){
 // ── PAGOS ─────────────────────────────────────────────────────────────────────
 // Helper: build ledger for one patient
 // Each confirmed/done session is a DEBIT (they owe), each payment is a CREDIT (they paid)
-function buildLedger(patient, appointments, payments, sessionFee){
+// scopeMonth: if provided (e.g. "2026-04"), only include entries from that month
+function buildLedger(patient, appointments, payments, sessionFee, scopeMonth){
   const fee = sessionFee || DEFAULT_FEE;
   const rows = [];
 
-  // Merge sessions and payments into chronological ledger
   const sessions = appointments
     .filter(a=>a.patientId===patient.id && (a.status==="confirmed"||a.status==="done"))
+    .filter(a=>!scopeMonth || a.date.startsWith(scopeMonth))
     .map(a=>({type:"session", date:a.date, time:a.time, label:"Sesión "+a.date+" "+a.time, amount:a.fee||fee, status:a.status, id:a.id}));
 
   const pays = payments
     .filter(p=>p.patientId===patient.id)
+    .filter(p=>!scopeMonth || p.date.startsWith(scopeMonth))
     .map(p=>({type:"payment", date:p.date, time:"", label:p.concept||"Pago", amount:p.amount, method:p.method, status:p.status, id:p.id}));
 
   const all = [...sessions, ...pays].sort((a,b)=>
@@ -1910,15 +1991,14 @@ function buildLedger(patient, appointments, payments, sessionFee){
   let balance = 0;
   all.forEach(item=>{
     if(item.type==="session"){
-      balance += item.amount; // session = debt (positive = owes)
+      balance += item.amount;
       rows.push({...item, debit:item.amount, credit:0, balance});
     } else if(item.status==="paid"){
-      balance -= item.amount; // payment = reduces debt
+      balance -= item.amount;
       rows.push({...item, debit:0, credit:item.amount, balance});
     }
-    // pending payments are not counted in balance yet
   });
-  return {rows, balance}; // balance > 0 = patient owes, < 0 = overpaid
+  return {rows, balance};
 }
 
 // Ledger sub-component (proper component so hooks are valid)
@@ -2032,9 +2112,9 @@ function Pagos({data,setData}){
   const diffPct=paidPrev>0?Math.round((diff/paidPrev)*100):null;
 
   const patientBalances=useMemo(()=>
-    patients.map(p=>{const{balance}=buildLedger(p,appointments,payments);return{patient:p,balance};})
+    patients.map(p=>{const{balance}=buildLedger(p,appointments,payments,null,month);return{patient:p,balance};})
     .sort((a,b)=>b.balance-a.balance)
-  ,[patients,appointments,payments]);
+  ,[patients,appointments,payments,month]);
 
   const totalOwed=patientBalances.filter(x=>x.balance>0).reduce((s,x)=>s+x.balance,0);
   const totalFavor=patientBalances.filter(x=>x.balance<0).reduce((s,x)=>s+Math.abs(x.balance),0);
@@ -2091,7 +2171,7 @@ function Pagos({data,setData}){
           </div>
           <div style={{display:"flex",gap:10,marginBottom:10}}>
             <Stat label="Cobrado" value={"$"+paid.toLocaleString()} sub={fil.filter(p=>p.status==="paid").length+" pagos"} color={C.green}/>
-            <Stat label="A cobrar (total)" value={"$"+totalOwed.toLocaleString()} color={totalOwed>0?C.yellow:C.muted}/>
+            <Stat label={"A cobrar "+month} value={"$"+totalOwed.toLocaleString()} color={totalOwed>0?C.yellow:C.muted}/>
           </div>
           <div style={{display:"flex",gap:10,marginBottom:12}}>
             <Stat label="💵 Efectivo" value={"$"+efec.toLocaleString()}/>
@@ -2134,8 +2214,12 @@ function Pagos({data,setData}){
 
       {tab==="estados"&&(
         <>
+          <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:12}}>
+            <label style={{fontSize:12,color:C.muted}}>Mes:</label>
+            <input type="month" value={month} onChange={e=>setMonth(e.target.value)} style={{background:C.card,color:C.text,border:"1px solid "+C.border,borderRadius:8,padding:"6px 10px",fontSize:12}}/>
+          </div>
           <div style={{display:"flex",gap:10,marginBottom:14}}>
-            <Stat label="Total a cobrar" value={"$"+totalOwed.toLocaleString()} color={totalOwed>0?C.yellow:C.muted}/>
+            <Stat label={"A cobrar "+month} value={"$"+totalOwed.toLocaleString()} color={totalOwed>0?C.yellow:C.muted}/>
             <Stat label="Saldos a favor" value={"$"+totalFavor.toLocaleString()} color={totalFavor>0?C.accent:C.muted}/>
           </div>
           <button onClick={shareFullReport} style={{width:"100%",background:C.surface,border:"1px solid "+C.border,borderRadius:10,padding:"10px 0",color:C.muted,fontSize:12,fontWeight:600,cursor:"pointer",marginBottom:14}}>
