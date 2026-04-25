@@ -289,12 +289,13 @@ const C={bg:"#0f1117",surface:"#181c27",card:"#1e2235",border:"#2a3050",
   accent:"#6c8fff",al:"#8facff",green:"#4ecb8b",yellow:"#f5c842",red:"#ff6b6b",text:"#e8eaf6",muted:"#7b83a6"};
 
 // ── STORAGE ──────────────────────────────────────────────────────────────────
-const SK="sonia_v17";
+const SK="sonia_v18";
 const SEED={
   therapist:{name:"",specialty:"Psicología Clínica",cedula:"",address:"",phone:"",email:"",
     payments:[{id:1,label:"CLABE",value:""},{id:2,label:"Mercado Pago",value:""}]},
   patients:[],appointments:[],payments:[],notes:[],
   apiKey:"",
+  paymentsPin:"",  // 4-digit PIN to lock the pagos tab; empty = no lock
   daySchedule: {0:[],1:[],2:[],3:[],4:[],5:[],6:[]}, // blocked time ranges per day-of-week
   // patients carry: frequency, preferredDay, preferredTime, paymentScheme
 };
@@ -461,84 +462,90 @@ function useVoice(onResult){
 }
 
 // ── VOICE COMMAND PROCESSOR ──────────────────────────────────────────────────
-// Now receives an array of alternatives and tries each one
 function processVoiceCommand(alternatives,dataRef,setData,setTab,speak,flash,setSlotDays){
-  // Normalize: remove accents, lowercase
   const norm=s=>s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").trim();
-
-  // Try to match any alternative
   const {patients,appointments,payments}=dataRef.current;
-  const DOW_MAP={
-    lunes:1,martes:2,miercoles:3,jueves:4,viernes:5,sabado:6,domingo:0,
-    lun:1,mar:2,mie:3,mier:3,jue:4,vie:5,sab:6,dom:0,
-    monday:1,tuesday:2,wednesday:3,thursday:4,friday:5,saturday:6,sunday:0,
-  };
 
-  // Fuzzy name match: find patient whose name words appear in hint
+  const DOW_MAP={lunes:1,martes:2,miercoles:3,jueves:4,viernes:5,sabado:6,domingo:0,
+    lun:1,mar:2,mie:3,mier:3,jue:4,vie:5,sab:6,dom:0};
+
+  // Keyword presence check — much more permissive than regex
+  const has=(t,...words)=>words.every(w=>t.includes(w));
+  const any=(t,...words)=>words.some(w=>t.includes(w));
+
   const matchName=hint=>{
     const hn=norm(hint);
-    // Try exact first, then partial
     return patients.find(p=>{
-      const pn=norm(p.name);
-      const words=pn.split(" ").filter(w=>w.length>2);
+      const words=norm(p.name).split(" ").filter(w=>w.length>2);
       return words.some(w=>hn.includes(w));
     });
   };
 
-  // Try each alternative until we get a match
   for(const raw of alternatives){
     const t=norm(raw);
+    // Debug: always show what was heard
+    console.log("[Voice]",t);
 
-    // ── NAVIGATION ──────────────────────────────────────────────────────────
-    if(/pacientes?|inicio/.test(t)&&/(ir|abrir|ver|mostrar|vamos|lleva|abre)/.test(t)){setTab("pacientes");speak("Pacientes");return;}
-    if(/agenda/.test(t)&&/(ir|abrir|ver|mostrar|vamos|lleva|abre)/.test(t)){setTab("agenda");speak("Agenda");return;}
-    if(/pagos?/.test(t)&&/(ir|abrir|ver|mostrar|vamos|lleva|abre)/.test(t)){setTab("pagos");speak("Pagos");return;}
-    if(/(chat|asistente|sonia)/.test(t)&&/(ir|abrir|ver|mostrar|vamos|lleva|abre)/.test(t)){setTab("chat");speak("Asistente");return;}
-    if(/perfil/.test(t)&&/(ir|abrir|ver|mostrar|vamos|lleva|abre)/.test(t)){setTab("perfil");speak("Perfil");return;}
+    // ── NAVIGATION ────────────────────────────────────────────────────────
+    // Very permissive: if any nav word + any section word → navigate
+    const navWords=["ir","abrir","ver","mostrar","vamos","lleva","abre","muestra","navega","entra","anda","show","go","open"];
+    const isNav=any(t,...navWords)||t.split(" ").length<=3; // short phrases = likely nav
 
-    // ── ADD PATIENT: "agregar paciente Laura Soto lunes 10" ─────────────────
-    if(/paciente/.test(t)&&/(agregar|nuevo|añadir|crear|registrar)/.test(t)){
-      // Extract name: everything after "paciente" until a day name or number
-      const afterP=t.replace(/.*paciente\s+/,"");
-      // Split on day names or "a las"
+    if(isNav&&any(t,"agenda","calendario","citas","horario")){setTab("agenda");speak("Agenda");return;}
+    if(isNav&&any(t,"pago","pagos","cobro","cobros","dinero","plata","factura")){setTab("pagos");speak("Pagos");return;}
+    if(isNav&&any(t,"perfil","configuracion","ajuste","cuenta","datos")){setTab("perfil");speak("Perfil");return;}
+    if(isNav&&any(t,"chat","asistente","sonia","ayuda","conversa")){setTab("chat");speak("Chat");return;}
+    if(isNav&&any(t,"paciente","listado","lista","pacientes")){setTab("pacientes");speak("Pacientes");return;}
+
+    // ── ADD PATIENT ───────────────────────────────────────────────────────
+    if(any(t,"paciente","nuevo paciente","agregar","añadir")&&any(t,"paciente","nuevo")){
+      // Extract name — everything after the trigger word that looks like a name
+      const afterTrigger=t
+        .replace(/agregar|nuevo|añadir|crear|registrar/g,"")
+        .replace(/paciente/g,"")
+        .trim();
+
+      // Remove day/time words to isolate name
       const dayKeys=Object.keys(DOW_MAP).join("|");
-      const splitRx=new RegExp("\\s+(?:los?\\s+)?("+dayKeys+")\\s|\\s+a\\s+las?\\s+|\\s+(\\d{1,2})\\s*$");
-      const nameEnd=afterP.search(splitRx);
-      const rawName=nameEnd>0?afterP.slice(0,nameEnd).trim():afterP.trim();
-      const fullName=rawName.split(" ").map(w=>w?w[0].toUpperCase()+w.slice(1):"").join(" ").trim();
-      if(!fullName){flash("❌ No entendí el nombre");continue;}
+      const nameOnly=afterTrigger
+        .replace(new RegExp("(?:los?\\s+)?("+dayKeys+")","g"),"")
+        .replace(/a las?|las?|\d{1,2}:\d{2}|\d{1,2}\s*hs?/g,"")
+        .replace(/\s+/g," ").trim();
 
-      // Extract day
-      let dow=null;
-      const dayMatch=t.match(new RegExp("(?:los?\\s+)?("+dayKeys+")"));
-      if(dayMatch) dow=DOW_MAP[dayMatch[1]];
+      const fullName=nameOnly.split(" ")
+        .filter(w=>w.length>1)
+        .map(w=>w[0].toUpperCase()+w.slice(1))
+        .join(" ").trim();
 
-      // Extract time
+      if(!fullName||fullName.length<3){flash("❌ No entendí el nombre del paciente");continue;}
+
+      // Day extraction
+      const dayMatch=t.match(new RegExp("(?:los?\\s+)?("+dayKeys+")(\\b|\\s|$)"));
+      const dow=dayMatch?DOW_MAP[dayMatch[1]]:null;
+
+      // Time extraction
       let time=null;
-      const timeMatch=t.match(/(?:a las?|las?)\s*(\d{1,2})(?::(\d{2}))?|(\d{1,2})\s*(?:horas?|hs?)/);
-      if(timeMatch){
-        const h=String(parseInt(timeMatch[1]||timeMatch[3])).padStart(2,"0");
-        const m=timeMatch[2]||"00";
+      const tm=t.match(/(\d{1,2}):(\d{2})|(?:a las?|las?)\s*(\d{1,2})/);
+      if(tm){
+        const h=String(parseInt(tm[1]||tm[3])).padStart(2,"0");
+        const m=tm[2]||"00";
         time=h+":"+m;
       }
 
       let apptDate=null;
       if(dow!==null&&time){
         const base=new Date(getToday()+"T12:00:00");
-        let tries=0;
-        while(base.getDay()!==dow&&tries<7){base.setDate(base.getDate()+1);tries++;}
-        apptDate=base.toISOString().split("T")[0];
+        for(let i=0;i<7;i++){if(base.getDay()===dow)break;base.setDate(base.getDate()+1);}
+        if(base.getDay()===dow) apptDate=base.toISOString().split("T")[0];
       }
 
-      const existing=patients.find(p=>norm(p.name)===norm(fullName));
+      const existing=patients.find(p=>norm(p.name).includes(norm(fullName))||norm(fullName).includes(norm(p.name)));
       if(existing){
         if(apptDate&&time){
           setData(d=>({...d,appointments:[...d.appointments,{id:Date.now(),patientId:existing.id,patientName:existing.name,date:apptDate,time,duration:50,status:"confirmed",fee:DEFAULT_FEE}]}));
-          speak("Cita agendada para "+existing.name.split(" ")[0]);
-          flash("✓ "+existing.name+" · "+apptDate+" "+time);
-        } else {
-          speak(fullName+" ya existe");flash("Ya existe: "+fullName);
-        }
+          speak("Cita para "+existing.name.split(" ")[0]);
+          flash("✓ "+existing.name+" "+apptDate+" "+time);
+        } else {speak(fullName+" ya existe");flash("Ya existe: "+fullName);}
       } else {
         const newP={id:Date.now(),name:fullName,phone:"",email:"",since:getToday()};
         setData(d=>{
@@ -553,46 +560,44 @@ function processVoiceCommand(alternatives,dataRef,setData,setTab,speak,flash,set
       return;
     }
 
-    // ── FREE SLOTS ──────────────────────────────────────────────────────────
-    if(/horas?\s*(libres?|disponibles?|libres)|disponibilidad|horario\s*libre/.test(t)){
-      const nm=t.match(/(\d+)\s*dias?/);
+    // ── FREE SLOTS ────────────────────────────────────────────────────────
+    if(any(t,"libre","libres","disponible","disponibles","disponibilidad","horario libre","horas libres")){
+      const nm=t.match(/(\d+)\s*dia/);
       const n=nm?parseInt(nm[1]):7;
       setTab("agenda");setSlotDays(n);
-      speak("Mostrando horas libres, "+n+" días");flash("🔍 Horas libres: "+n+" días");return;
+      speak("Horas libres");flash("🔍 Horas libres: "+n+" días");return;
     }
 
-    // ── REGISTER PAYMENT ────────────────────────────────────────────────────
-    if(/(cobr|pag[oa]|registr).{0,15}\d/.test(t)||/\d.{0,15}(cobr|pag[oa])/.test(t)){
-      const amtMatch=t.match(/(\d{3,6})/);
-      const amt=amtMatch?parseInt(amtMatch[1]):null;
-      if(amt&&amt>=100){
-        // Try to find patient name before or after the amount
-        const withoutAmt=t.replace(amtMatch[0],"");
-        const p=matchName(withoutAmt)||matchName(t);
+    // ── REGISTER PAYMENT ─────────────────────────────────────────────────
+    if(any(t,"cobr","pago","registrar pago","ingres")&&t.match(/\d{3,}/)){
+      const amtM=t.match(/(\d{3,6})/);
+      const amt=amtM?parseInt(amtM[1]):null;
+      if(amt>=100){
+        const p=matchName(t.replace(amtM[0],""))||matchName(t);
         if(p){
           setData(d=>({...d,payments:[...d.payments,{id:Date.now(),patientId:p.id,patientName:p.name,date:getToday(),amount:amt,method:"efectivo",concept:"Pago por voz",status:"paid"}]}));
-          speak("$"+amt.toLocaleString()+" de "+p.name.split(" ")[0]+" registrado");
+          speak(amt.toLocaleString()+" de "+p.name.split(" ")[0]);
           flash("✓ $"+amt.toLocaleString()+" — "+p.name);setTab("pagos");return;
         }
       }
     }
 
-    // ── BOOK APPOINTMENT ────────────────────────────────────────────────────
-    if(/(agendar|cita|sesion|programar|nueva?\s+cita)/.test(t)){
+    // ── BOOK APPOINTMENT ─────────────────────────────────────────────────
+    if(any(t,"agendar","citar","programar","nueva cita","nueva sesion")||
+       (any(t,"cita","sesion")&&any(t,"para","con"))){
       const p=matchName(t);
-      const timeMatch=t.match(/(?:a las?|las?)\s*(\d{1,2})(?::(\d{2}))?/);
       if(p){
-        const h=timeMatch?String(parseInt(timeMatch[1])).padStart(2,"0"):"10";
-        const m=timeMatch&&timeMatch[2]?timeMatch[2]:"00";
-        const time=h+":"+m;
+        const tm2=t.match(/(?:a las?|las?)\s*(\d{1,2})/);
+        const h=tm2?String(parseInt(tm2[1])).padStart(2,"0"):"10";
+        const time=h+":00";
         setData(d=>({...d,appointments:[...d.appointments,{id:Date.now(),patientId:p.id,patientName:p.name,date:getToday(),time,duration:50,status:"confirmed",fee:DEFAULT_FEE}]}));
         speak("Cita para "+p.name.split(" ")[0]+" a las "+h);
-        flash("✓ "+p.name+" · "+time);setTab("agenda");return;
+        flash("✓ "+p.name+" "+time);setTab("agenda");return;
       }
     }
 
-    // ── MARK DONE ───────────────────────────────────────────────────────────
-    if(/(realiz|complet|termin|hecha?|done)/.test(t)){
+    // ── MARK DONE ────────────────────────────────────────────────────────
+    if(any(t,"realiz","complet","termin","hech","marcar")){
       const p=matchName(t);
       const appt=p&&[...appointments].reverse().find(a=>a.status==="confirmed"&&a.patientId===p.id);
       if(appt){
@@ -602,24 +607,24 @@ function processVoiceCommand(alternatives,dataRef,setData,setTab,speak,flash,set
       }
     }
 
-    // ── QUERIES ─────────────────────────────────────────────────────────────
-    if(/(pendiente|cobrar|saldo|debo|deben)/.test(t)){
+    // ── QUERIES ──────────────────────────────────────────────────────────
+    if(any(t,"pendiente","cobrar","saldo","deben","cuanto me deben")){
       const total=payments.filter(p=>p.status==="pending").reduce((s,p)=>s+p.amount,0);
       speak(total>0?total.toLocaleString()+" pesos pendientes":"Sin cobros pendientes");
       flash("Pendiente: $"+total.toLocaleString());return;
     }
-    if(/(citas?|sesiones?).{0,10}(hoy|dia|d[ií]a)|hoy.{0,10}(citas?|sesiones?)/.test(t)){
+    if(any(t,"hoy")&&any(t,"cita","sesion","turno")){
       const n=appointments.filter(a=>a.date===getToday()).length;
-      speak(n+" cita"+(n!==1?"s":" ")+"hoy");flash("Citas hoy: "+n);return;
+      speak(n+" cita"+(n!==1?"s":"")+" hoy");flash("Hoy: "+n+" citas");return;
     }
-    if(/(cu[aá]ntos?|total|cuantos?).{0,15}pacientes?/.test(t)){
-      speak(patients.length+" pacientes");flash("Pacientes: "+patients.length);return;
+    if(any(t,"cuantos","cuantas","total")&&any(t,"paciente")){
+      speak(patients.length+" pacientes");flash("Total: "+patients.length+" pacientes");return;
     }
   }
 
-  // No command matched across all alternatives
-  flash("¿? No reconocí: \""+alternatives[0]+"\" — intentá con: ir a agenda, registrar pago, agendar cita...");
-  speak("No entendí el comando");
+  // Nothing matched — show what was heard to help debug
+  flash("Escuché: \""+alternatives[0]+"\" · Probá: agenda, pagos, cita, paciente...");
+  speak("No entendí, probá con agenda o pagos");
 }
 
 // ── MIC BUTTON ────────────────────────────────────────────────────────────────
@@ -1966,6 +1971,66 @@ function Agenda({data,setData,slotDays,setSlotDays}){
   );
 }
 
+// ── PIN LOCK ──────────────────────────────────────────────────────────────────
+function PinLock({pin, onSuccess}){
+  const [entered, setEntered] = useState("");
+  const [error, setError] = useState(false);
+  const [shake, setShake] = useState(false);
+
+  const press = (d) => {
+    if(entered.length >= 4) return;
+    const next = entered + d;
+    setEntered(next);
+    setError(false);
+    if(next.length === 4){
+      if(next === pin){
+        onSuccess();
+      } else {
+        setShake(true);
+        setError(true);
+        setTimeout(()=>{setEntered("");setShake(false);}, 600);
+      }
+    }
+  };
+
+  const dots = Array.from({length:4},(_,i)=>(
+    <div key={i} style={{width:16,height:16,borderRadius:"50%",
+      background: i<entered.length ? C.accent : "transparent",
+      border:"2px solid "+(i<entered.length ? C.accent : C.border),
+      transition:"all .15s"}}/>
+  ));
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:"60vh",padding:"0 24px"}}>
+      <div style={{fontSize:32,marginBottom:12}}>💳</div>
+      <div style={{fontFamily:"Fraunces",fontSize:20,fontWeight:400,marginBottom:6}}>Pagos</div>
+      <div style={{fontSize:13,color:C.muted,marginBottom:32}}>Ingresá tu PIN de 4 dígitos</div>
+      <div style={{display:"flex",gap:16,marginBottom:32,animation:shake?"shake .3s":"none"}}>
+        {dots}
+      </div>
+      {error&&<div style={{color:C.red,fontSize:13,marginBottom:16}}>PIN incorrecto</div>}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,width:220}}>
+        {[1,2,3,4,5,6,7,8,9,"",0,"⌫"].map((d,i)=>(
+          <button key={i} onClick={()=>{if(d==="⌫")setEntered(e=>e.slice(0,-1));else if(d!=="")press(String(d));}}
+            disabled={d===""}
+            style={{
+              height:64, borderRadius:12,
+              background: d===""?"transparent": d==="⌫"?C.surface:C.card,
+              border: d===""?"none": "1px solid "+C.border,
+              color: C.text, fontSize: d==="⌫"?20:22, fontWeight:600,
+              cursor: d===""?"default":"pointer",
+              opacity: d===""?0:1,
+              transition:"background .1s",
+            }}>
+            {d}
+          </button>
+        ))}
+      </div>
+      <style>{`@keyframes shake{0%{transform:translateX(0)}20%{transform:translateX(-8px)}40%{transform:translateX(8px)}60%{transform:translateX(-6px)}80%{transform:translateX(6px)}100%{transform:translateX(0)}}`}</style>
+    </div>
+  );
+}
+
 // ── PAGOS ─────────────────────────────────────────────────────────────────────
 // Helper: build ledger for one patient
 // Each confirmed/done session is a DEBIT (they owe), each payment is a CREDIT (they paid)
@@ -2306,6 +2371,96 @@ function Pagos({data,setData}){
     </div>
   );
 }
+// ── PIN SETUP CARD ────────────────────────────────────────────────────────────
+function PinSetupCard({data, setData}){
+  const [mode, setMode] = useState("view");
+  const [newPin, setNewPin] = useState("");
+  const [confirmPin, setConfirmPin] = useState("");
+  const [error, setError] = useState("");
+  const [saved, setSaved] = useState(false);
+  const hasPin = data.paymentsPin && data.paymentsPin.length===4;
+
+  const pressNew=(d)=>{
+    if(newPin.length>=4) return;
+    setNewPin(p=>p+d); setError("");
+  };
+  const pressConfirm=(d)=>{
+    const next=confirmPin+d;
+    setConfirmPin(next);
+    if(next.length===4){
+      if(next===newPin){
+        setData(dd=>({...dd,paymentsPin:next}));
+        setSaved(true);setMode("view");setNewPin("");setConfirmPin("");
+        setTimeout(()=>setSaved(false),2000);
+      } else {
+        setError("Los PINs no coinciden");
+        setTimeout(()=>{setConfirmPin("");setError("");},800);
+      }
+    }
+  };
+  const removePin=()=>{
+    if(!confirm("Quitar el PIN de Pagos?")) return;
+    setData(dd=>({...dd,paymentsPin:""}));
+  };
+
+  const NumPad=({onPress,entered,label})=>(
+    <div>
+      <div style={{fontSize:12,color:C.muted,marginBottom:10,textAlign:"center"}}>{label}</div>
+      <div style={{display:"flex",gap:12,justifyContent:"center",marginBottom:20}}>
+        {Array.from({length:4},(_,i)=>(
+          <div key={i} style={{width:14,height:14,borderRadius:"50%",background:i<entered.length?C.accent:"transparent",border:"2px solid "+(i<entered.length?C.accent:C.border),transition:"all .15s"}}/>
+        ))}
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,maxWidth:200,margin:"0 auto"}}>
+        {[1,2,3,4,5,6,7,8,9,"",0,"X"].map((d,i)=>(
+          <button key={i} onClick={()=>{if(d==="X")onPress("DEL");else if(d!=="")onPress(String(d));}}
+            disabled={d===""}
+            style={{height:52,borderRadius:10,background:d===""?"transparent":C.card,border:d===""?"none":"1px solid "+C.border,color:C.text,fontSize:18,fontWeight:600,cursor:d===""?"default":"pointer",opacity:d===""?0:1}}>
+            {d==="X"?"⌫":d}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+
+  return (
+    <Card style={{marginBottom:14,borderColor:hasPin?C.accent+"44":C.border}}>
+      <div style={{fontSize:11,fontWeight:600,color:C.muted,textTransform:"uppercase",letterSpacing:.5,marginBottom:12}}>🔐 PIN de Pagos</div>
+      {mode==="view"&&(
+        <>
+          <div style={{fontSize:12,color:C.muted,lineHeight:1.6,marginBottom:12}}>
+            {hasPin?"PIN activado. La sección Pagos requiere PIN para acceder.":"Sin PIN. Cualquiera puede ver los pagos."}
+          </div>
+          {saved&&<div style={{fontSize:12,color:C.green,marginBottom:8}}>Guardado</div>}
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={()=>{setMode("set");setNewPin("");setConfirmPin("");setError("");}}
+              style={{flex:1,background:C.accent+"18",border:"1px solid "+C.accent+"44",borderRadius:9,padding:"9px 0",color:C.al,fontSize:12,fontWeight:600,cursor:"pointer"}}>
+              {hasPin?"Cambiar PIN":"+ Crear PIN"}
+            </button>
+            {hasPin&&<button onClick={removePin}
+              style={{flex:1,background:C.red+"18",border:"1px solid "+C.red+"44",borderRadius:9,padding:"9px 0",color:C.red,fontSize:12,fontWeight:600,cursor:"pointer"}}>
+              Quitar PIN
+            </button>}
+          </div>
+        </>
+      )}
+      {mode==="set"&&(
+        <div>
+          {newPin.length<4
+            ?<NumPad onPress={(d)=>{if(d==="DEL")setNewPin(p=>p.slice(0,-1));else pressNew(d);}} entered={newPin} label="Nuevo PIN de 4 digitos"/>
+            :<NumPad onPress={(d)=>{if(d==="DEL")setConfirmPin(p=>p.slice(0,-1));else pressConfirm(d);}} entered={confirmPin} label="Repetir PIN para confirmar"/>
+          }
+          {error&&<div style={{color:C.red,fontSize:12,textAlign:"center",marginTop:8}}>{error}</div>}
+          <button onClick={()=>{setMode("view");setNewPin("");setConfirmPin("");}}
+            style={{width:"100%",background:"none",color:C.muted,fontSize:12,padding:"8px 0",marginTop:8,cursor:"pointer"}}>
+            Cancelar
+          </button>
+        </div>
+      )}
+    </Card>
+  );
+}
+
 function BackupCard({data, setData}){
   const [importError,setImportError]=useState("");
   const [importOk,setImportOk]=useState(false);
@@ -2439,6 +2594,9 @@ function Perfil({data,setData}){
         {data.apiKey&&<div style={{fontSize:11,color:C.green,marginTop:6}}>✓ API key configurada — chat activo</div>}
       </Card>
 
+      {/* ── PIN para Pagos ── */}
+      <PinSetupCard data={data} setData={setData}/>
+
       {/* ── BACKUP / RESTORE ── */}
       <BackupCard data={data} setData={setData}/>
 
@@ -2484,65 +2642,62 @@ function App(){
   const [data,setData]=useState(()=>loadData());
   const [tab,setTab]=useState("pacientes");
   const [slotDays,setSlotDays]=useState(7);
+  const [pinUnlocked,setPinUnlocked]=useState(false);
   const dataRef=useRef(data);
   useEffect(()=>{dataRef.current=data;},[data]);
   useEffect(()=>saveData(data),[data]);
 
-  const {requestPerm, prompt, resolvePrompt, dismissPrompt} = useNotifications(data, setData);
+  const {requestPerm,prompt,resolvePrompt,dismissPrompt}=useNotifications(data,setData);
+  useEffect(()=>{requestPerm();},[]);
 
-  // Request notification permission on first load
-  useEffect(()=>{ requestPerm(); },[]);
+  const handleTabChange=(newTab)=>{
+    if(tab==="pagos"&&newTab!=="pagos") setPinUnlocked(false);
+    setTab(newTab);
+  };
 
+  const pinActive=data.paymentsPin&&data.paymentsPin.length===4;
+  const needsPin=tab==="pagos"&&pinActive&&!pinUnlocked;
   const tabs=[{id:"pacientes",l:"Pacientes",icon:"👤"},{id:"agenda",l:"Agenda",icon:"📅"},{id:"pagos",l:"Pagos",icon:"💳"},{id:"chat",l:"Asistente",icon:"🌿"},{id:"perfil",l:"Perfil",icon:"🪪"}];
   const pendN=data.payments.filter(p=>p.status==="pending").length;
-  const todayN=data.appointments.filter(a=>a.date===TODAY).length;
+  const todayN=data.appointments.filter(a=>a.date===getToday()).length;
+
+  const catSvg=(
+    <svg width="28" height="28" viewBox="0 0 100 100">
+      <ellipse cx="50" cy="56" rx="40" ry="36" fill="#f5f5f0"/>
+      <path d="M10 30 Q20 20 38 28 Q30 40 18 46 Z" fill="#1a1a1a"/>
+      <path d="M62 24 Q78 18 90 34 Q82 46 68 42 Z" fill="#c8860a"/>
+      <polygon points="16,38 8,14 30,28" fill="#1a1a1a"/>
+      <polygon points="18,36 12,18 28,28" fill="#c8607a" opacity=".7"/>
+      <polygon points="84,38 92,14 70,28" fill="#c8860a"/>
+      <polygon points="82,36 88,18 72,28" fill="#e8a0a0" opacity=".7"/>
+      <ellipse cx="35" cy="52" rx="8" ry="9" fill="#1a1a1a"/>
+      <ellipse cx="65" cy="52" rx="8" ry="9" fill="#1a1a1a"/>
+      <ellipse cx="35" cy="52" rx="5" ry="7" fill="#4a9a6a"/>
+      <ellipse cx="65" cy="52" rx="5" ry="7" fill="#c8860a"/>
+      <ellipse cx="37" cy="50" rx="2" ry="3" fill="#111"/>
+      <ellipse cx="67" cy="50" rx="2" ry="3" fill="#111"/>
+      <circle cx="37" cy="49" r="1.2" fill="white"/>
+      <circle cx="67" cy="49" r="1.2" fill="white"/>
+      <ellipse cx="68" cy="64" rx="14" ry="10" fill="#c8860a" opacity=".55"/>
+      <ellipse cx="50" cy="66" rx="4" ry="2.5" fill="#e88"/>
+      <path d="M50 68.5 Q44 73 40 71" stroke="#aaa" strokeWidth="1.2" fill="none" strokeLinecap="round"/>
+      <path d="M50 68.5 Q56 73 60 71" stroke="#aaa" strokeWidth="1.2" fill="none" strokeLinecap="round"/>
+      <line x1="10" y1="64" x2="38" y2="67" stroke="#888" strokeWidth=".9" opacity=".7"/>
+      <line x1="10" y1="68" x2="38" y2="69" stroke="#888" strokeWidth=".9" opacity=".7"/>
+      <line x1="10" y1="72" x2="38" y2="71" stroke="#888" strokeWidth=".9" opacity=".7"/>
+      <line x1="90" y1="64" x2="62" y2="67" stroke="#888" strokeWidth=".9" opacity=".7"/>
+      <line x1="90" y1="68" x2="62" y2="69" stroke="#888" strokeWidth=".9" opacity=".7"/>
+      <line x1="90" y1="72" x2="62" y2="71" stroke="#888" strokeWidth=".9" opacity=".7"/>
+    </svg>
+  );
 
   return (
     <div style={{minHeight:"100vh",background:C.bg,maxWidth:560,margin:"0 auto"}}>
-      {/* ── HEADER ── */}
-      <div style={{padding:"22px 16px 16px",borderBottom:`1px solid ${C.border}`,position:"sticky",top:0,background:C.bg,zIndex:50,backgroundImage:`radial-gradient(ellipse at 50% 0%, #1a1f35 0%, ${C.bg} 70%)`}}>
+      <div style={{padding:"22px 16px 16px",borderBottom:"1px solid "+C.border,position:"sticky",top:0,background:C.bg,zIndex:50,backgroundImage:"radial-gradient(ellipse at 50% 0%, #1a1f35 0%, "+C.bg+" 70%)"}}>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-          {/* Logo left */}
           <div style={{display:"flex",alignItems:"center",gap:10}}>
-            <div style={{width:38,height:38,borderRadius:12,background:`linear-gradient(135deg,#1e2235,#2a3050)`,border:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"center",overflow:"hidden",flexShrink:0}}>
-              <svg width="28" height="28" viewBox="0 0 100 100">
-                {/* Calico cat face — black, white, amber */}
-                {/* White base face */}
-                <ellipse cx="50" cy="56" rx="40" ry="36" fill="#f5f5f0"/>
-                {/* Black patch top-left */}
-                <path d="M10 30 Q20 20 38 28 Q30 40 18 46 Z" fill="#1a1a1a"/>
-                {/* Amber patch top-right */}
-                <path d="M62 24 Q78 18 90 34 Q82 46 68 42 Z" fill="#c8860a"/>
-                {/* Left ear */}
-                <polygon points="16,38 8,14 30,28" fill="#1a1a1a"/>
-                <polygon points="18,36 12,18 28,28" fill="#c8607a" opacity=".7"/>
-                {/* Right ear */}
-                <polygon points="84,38 92,14 70,28" fill="#c8860a"/>
-                <polygon points="82,36 88,18 72,28" fill="#e8a0a0" opacity=".7"/>
-                {/* Eyes */}
-                <ellipse cx="35" cy="52" rx="8" ry="9" fill="#1a1a1a"/>
-                <ellipse cx="65" cy="52" rx="8" ry="9" fill="#1a1a1a"/>
-                <ellipse cx="35" cy="52" rx="5" ry="7" fill="#4a9a6a"/>
-                <ellipse cx="65" cy="52" rx="5" ry="7" fill="#c8860a"/>
-                <ellipse cx="37" cy="50" rx="2" ry="3" fill="#111"/>
-                <ellipse cx="67" cy="50" rx="2" ry="3" fill="#111"/>
-                <circle cx="37" cy="49" r="1.2" fill="white"/>
-                <circle cx="67" cy="49" r="1.2" fill="white"/>
-                {/* Amber patch on cheek */}
-                <ellipse cx="68" cy="64" rx="14" ry="10" fill="#c8860a" opacity=".55"/>
-                {/* Nose */}
-                <ellipse cx="50" cy="66" rx="4" ry="2.5" fill="#e88"/>
-                {/* Mouth */}
-                <path d="M50 68.5 Q44 73 40 71" stroke="#aaa" strokeWidth="1.2" fill="none" strokeLinecap="round"/>
-                <path d="M50 68.5 Q56 73 60 71" stroke="#aaa" strokeWidth="1.2" fill="none" strokeLinecap="round"/>
-                {/* Whiskers */}
-                <line x1="10" y1="64" x2="38" y2="67" stroke="#888" strokeWidth=".9" opacity=".7"/>
-                <line x1="10" y1="68" x2="38" y2="69" stroke="#888" strokeWidth=".9" opacity=".7"/>
-                <line x1="10" y1="72" x2="38" y2="71" stroke="#888" strokeWidth=".9" opacity=".7"/>
-                <line x1="90" y1="64" x2="62" y2="67" stroke="#888" strokeWidth=".9" opacity=".7"/>
-                <line x1="90" y1="68" x2="62" y2="69" stroke="#888" strokeWidth=".9" opacity=".7"/>
-                <line x1="90" y1="72" x2="62" y2="71" stroke="#888" strokeWidth=".9" opacity=".7"/>
-              </svg>
+            <div style={{width:38,height:38,borderRadius:12,background:"linear-gradient(135deg,#1e2235,#2a3050)",border:"1px solid "+C.border,display:"flex",alignItems:"center",justifyContent:"center",overflow:"hidden",flexShrink:0}}>
+              {catSvg}
             </div>
             <div>
               <div style={{fontFamily:"Fraunces",fontSize:26,fontWeight:300,letterSpacing:-.8,lineHeight:1}}>
@@ -2551,40 +2706,36 @@ function App(){
               <div style={{fontSize:10,color:C.muted,letterSpacing:.3,marginTop:1}}>{data.therapist.name||"Consultorio"}</div>
             </div>
           </div>
-          {/* Badges right */}
           <div style={{display:"flex",gap:6,alignItems:"center"}}>
             {todayN>0&&<Badge color={C.accent}>{todayN} hoy</Badge>}
             {pendN>0&&<Badge color={C.yellow}>${data.payments.filter(p=>p.status==="pending").reduce((s,p)=>s+p.amount,0).toLocaleString()}</Badge>}
           </div>
         </div>
       </div>
+
       <div style={{padding:"14px 14px 110px"}}>
         {tab==="pacientes"&&<Pacientes data={data} setData={setData}/>}
         {tab==="agenda"&&<Agenda data={data} setData={setData} slotDays={slotDays} setSlotDays={setSlotDays}/>}
-        {tab==="pagos"&&<Pagos data={data} setData={setData}/>}
-        {tab==="chat"&&<Chatbot dataRef={dataRef} setData={setData} setTab={setTab}/>}
+        {tab==="pagos"&&(needsPin
+          ?<PinLock pin={data.paymentsPin} onSuccess={()=>setPinUnlocked(true)}/>
+          :<Pagos data={data} setData={setData}/>
+        )}
+        {tab==="chat"&&<Chatbot dataRef={dataRef} setData={setData} setTab={handleTabChange}/>}
         {tab==="perfil"&&<Perfil data={data} setData={setData}/>}
       </div>
-      <div style={{position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",width:"100%",maxWidth:560,background:C.surface,borderTop:`1px solid ${C.border}`,display:"flex",padding:"6px 0 env(safe-area-inset-bottom,10px)",zIndex:60}}>
+
+      <div style={{position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",width:"100%",maxWidth:560,background:C.surface,borderTop:"1px solid "+C.border,display:"flex",padding:"6px 0 env(safe-area-inset-bottom,10px)",zIndex:60}}>
         {tabs.map(t=>(
-          <button key={t.id} onClick={()=>setTab(t.id)} style={{flex:1,background:"none",border:"none",padding:"7px 0",color:tab===t.id?C.accent:C.muted,display:"flex",flexDirection:"column",alignItems:"center",gap:2,transition:"color .15s",position:"relative"}}>
-            <span style={{fontSize:18}}>{t.icon}</span>
+          <button key={t.id} onClick={()=>handleTabChange(t.id)}
+            style={{flex:1,background:"none",border:"none",padding:"7px 0",color:tab===t.id?C.accent:C.muted,display:"flex",flexDirection:"column",alignItems:"center",gap:2,transition:"color .15s",position:"relative"}}>
+            <span style={{fontSize:18}}>{t.id==="pagos"&&pinActive&&!pinUnlocked?"🔒":t.icon}</span>
             <span style={{fontSize:9,fontWeight:500,letterSpacing:.2}}>{t.l}</span>
             {t.id==="pagos"&&pendN>0&&<div style={{position:"absolute",top:4,right:"18%",width:7,height:7,borderRadius:"50%",background:C.yellow}}/>}
           </button>
         ))}
       </div>
-      {tab!=="chat"&&<MicButton dataRef={dataRef} setData={setData} setTab={setTab} setSlotDays={setSlotDays}/>}
-
-      {/* Session confirmation prompt — appears ~1hr after appointment ends */}
-      {prompt&&(
-        <SessionPrompt
-          appt={prompt}
-          patients={data.patients}
-          onResolve={resolvePrompt}
-          onDismiss={dismissPrompt}
-        />
-      )}
+      {tab!=="chat"&&<MicButton dataRef={dataRef} setData={setData} setTab={handleTabChange} setSlotDays={setSlotDays}/>}
+      {prompt&&<SessionPrompt appt={prompt} patients={data.patients} onResolve={resolvePrompt} onDismiss={dismissPrompt}/>}
     </div>
   );
 }
