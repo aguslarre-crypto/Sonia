@@ -1759,6 +1759,15 @@ function Agenda({data,setData,slotDays,setSlotDays}){
 }
 
 // ── PIN LOCK ──────────────────────────────────────────────────────────────────
+// Inject shake keyframe CSS once (can't use <style> tag inside JSX with Babel standalone)
+(function(){
+  if(document.getElementById('sonia-shake-css')) return;
+  const s=document.createElement('style');
+  s.id='sonia-shake-css';
+  s.textContent='@keyframes shake{0%,100%{transform:translateX(0)}20%{transform:translateX(-8px)}40%{transform:translateX(8px)}60%{transform:translateX(-6px)}80%{transform:translateX(6px)}}';
+  document.head.appendChild(s);
+})();
+
 function PinLock({pin, onSuccess}){
   const [entered, setEntered] = useState("");
   const [error, setError] = useState(false);
@@ -1813,7 +1822,6 @@ function PinLock({pin, onSuccess}){
           </button>
         ))}
       </div>
-      <style>{`@keyframes shake{0%{transform:translateX(0)}20%{transform:translateX(-8px)}40%{transform:translateX(8px)}60%{transform:translateX(-6px)}80%{transform:translateX(6px)}100%{transform:translateX(0)}}`}</style>
     </div>
   );
 }
