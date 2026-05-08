@@ -686,11 +686,12 @@ const SCHEME_INFO={per_session:{label:"Por sesión",sub:"Se cobra al terminar ca
 function SchemeCard({patient,data,setData,pA,pP}){
   const lp=data.patients.find(p=>p.id===patient.id)||patient;
   const scheme=lp.paymentScheme||"per_session";
+  const sessionFee=lp.sessionFee||DEFAULT_FEE;
   const today=getToday();
   const thisMonth=today.slice(0,7);
   const monthSess=pA.filter(a=>a.date.startsWith(thisMonth)&&a.status==="done").length;
   const monthTotal=pP.filter(p=>p.date.startsWith(thisMonth)&&p.status==="paid").reduce((s,p)=>s+p.amount,0);
-  const balance=monthTotal-monthSess*DEFAULT_FEE;
+  const balance=monthTotal-monthSess*sessionFee;
   return React.createElement(Card,{style:{marginBottom:14,borderColor:scheme!=="per_session"?SCHEME_INFO[scheme].color+"55":C.border}},
     React.createElement("div",{style:{fontSize:11,fontWeight:600,color:C.muted,textTransform:"uppercase",letterSpacing:.5,marginBottom:10}},"💳 Esquema de cobro"),
     React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:7}},
@@ -731,7 +732,7 @@ function FreqCard({patient,data,setData}){
     return result;
   },[lp,appointments]);
   const saveFreq=()=>{setData(d=>({...d,patients:d.patients.map(p=>p.id===patient.id?{...p,frequency:ff.frequency,preferredDay:parseInt(ff.preferredDay),preferredTime:ff.preferredTime}:p)}));setFM(false);};
-  const bookSugg=()=>{if(!suggestion)return;const clash=appointments.find(a=>a.patientId===patient.id&&a.date===suggestion.date&&a.time===suggestion.time&&a.status!=="cancelled");if(clash){alert("Ya existe una cita ese día");return;}setData(d=>({...d,appointments:[...d.appointments,{id:Date.now(),patientId:patient.id,patientName:patient.name,date:suggestion.date,time:suggestion.time,duration:50,status:"confirmed",fee:DEFAULT_FEE}]}));setSP(suggestion);setTimeout(()=>setSP(null),3500);};
+  const bookSugg=()=>{if(!suggestion)return;const clash=appointments.find(a=>a.patientId===patient.id&&a.date===suggestion.date&&a.time===suggestion.time&&a.status!=="cancelled");if(clash){alert("Ya existe una cita ese día");return;}const sf=data.patients.find(p=>p.id===patient.id)?.sessionFee||DEFAULT_FEE;setData(d=>({...d,appointments:[...d.appointments,{id:Date.now(),patientId:patient.id,patientName:patient.name,date:suggestion.date,time:suggestion.time,duration:50,status:"confirmed",fee:sf}]}));setSP(suggestion);setTimeout(()=>setSP(null),3500);};
   const freqColor=lp.frequency==="weekly"?C.accent:lp.frequency==="biweekly"?C.green:C.muted;
   const FREQ_L={none:"Sin frecuencia fija",weekly:"Semanal",biweekly:"Quincenal"};
   // preview for modal
@@ -811,8 +812,12 @@ function PatientProfile({patient,data,setData,onBack}){
   const[tab,setTab]=useState("resumen");
   const[noteModal,setNM]=useState(false);
   const[payModal,setPM]=useState(false);
+  const[editFee,setEditFee]=useState(false);
+  const[feeInput,setFeeInput]=useState(String(patient.sessionFee||DEFAULT_FEE));
   const[nf,setNF]=useState({content:"",session:"",date:getToday()});
-  const[pf,setPF]=useState({amount:String(DEFAULT_FEE),method:"efectivo",concept:"",date:getToday()});
+  const[pf,setPF]=useState({amount:String(patient.sessionFee||DEFAULT_FEE),method:"efectivo",concept:"",date:getToday()});
+  const lp=data.patients.find(p=>p.id===patient.id)||patient;
+  const sessionFee=lp.sessionFee||DEFAULT_FEE;
   const pA=appointments.filter(a=>a.patientId===patient.id).sort((a,b)=>b.date.localeCompare(a.date));
   const pP=payments.filter(p=>p.patientId===patient.id).sort((a,b)=>b.date.localeCompare(a.date));
   const pN=notes.filter(n=>n.patientId===patient.id).sort((a,b)=>b.date.localeCompare(a.date));
@@ -820,7 +825,8 @@ function PatientProfile({patient,data,setData,onBack}){
   const pend=pP.filter(p=>p.status==="pending").reduce((s,p)=>s+p.amount,0);
   const next=pA.find(a=>a.date>=getToday()&&a.status!=="cancelled");
   const addNote=()=>{if(!nf.content)return;setData(d=>({...d,notes:[...d.notes,{id:Date.now(),patientId:patient.id,date:nf.date,session:parseInt(nf.session)||pN.length+1,content:nf.content,private:true}]}));setNM(false);setNF({content:"",session:"",date:getToday()});};
-  const addPay=()=>{const amt=parseInt(pf.amount);if(!amt)return;setData(d=>({...d,payments:[...d.payments,{id:Date.now(),patientId:patient.id,patientName:patient.name,date:pf.date,amount:amt,method:pf.method,concept:pf.concept||"Pago",status:"paid"}]}));setPM(false);setPF({amount:String(DEFAULT_FEE),method:"efectivo",concept:"",date:getToday()});};
+  const addPay=()=>{const amt=parseInt(pf.amount);if(!amt)return;setData(d=>({...d,payments:[...d.payments,{id:Date.now(),patientId:patient.id,patientName:patient.name,date:pf.date,amount:amt,method:pf.method,concept:pf.concept||"Pago",status:"paid"}]}));setPM(false);setPF({amount:String(sessionFee),method:"efectivo",concept:"",date:getToday()});};
+  const saveFee=()=>{const f=parseInt(feeInput);if(!f||f<1)return;setData(d=>({...d,patients:d.patients.map(p=>p.id===patient.id?{...p,sessionFee:f}:p)}));setEditFee(false);};
   const SC={confirmed:C.accent,done:C.green,pending:C.yellow,cancelled:C.muted};
   const SL={confirmed:"Confirmada",done:"Realizada",pending:"Pendiente",cancelled:"Cancelada"};
   const tabs=[{id:"resumen",l:"Resumen"},{id:"sesiones",l:"Sesiones("+pA.length+")"},{id:"pagos",l:"Pagos("+pP.length+")"},{id:"notas",l:"Notas("+pN.length+")"}];
@@ -837,6 +843,21 @@ function PatientProfile({patient,data,setData,onBack}){
       React.createElement("div",{style:{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}},
         next?React.createElement(Badge,{color:C.accent},"📅 "+next.date+" "+next.time):React.createElement(Badge,{color:C.muted},"Sin próxima cita"),
         pend>0&&React.createElement(Badge,{color:C.yellow},"⚠ $"+pend.toLocaleString())
+      ),
+      // Session fee row
+      React.createElement("div",{style:{marginTop:12,paddingTop:10,borderTop:"1px solid "+C.border+"66",display:"flex",alignItems:"center",justifyContent:"space-between"}},
+        editFee
+          ?React.createElement("div",{style:{display:"flex",gap:8,alignItems:"center",flex:1}},
+              React.createElement("span",{style:{fontSize:12,color:C.muted,flexShrink:0}},"Valor sesión $"),
+              React.createElement("input",{type:"number",value:feeInput,onChange:e=>setFeeInput(e.target.value),style:{flex:1,background:C.surface,color:C.text,border:"1px solid "+C.accent,borderRadius:8,padding:"6px 10px",fontSize:13,maxWidth:120},autoFocus:true}),
+              React.createElement("button",{onClick:saveFee,style:{background:C.accent,color:"#fff",borderRadius:8,padding:"6px 12px",fontSize:12,fontWeight:600,border:"none",flexShrink:0}},"✓"),
+              React.createElement("button",{onClick:()=>{setEditFee(false);setFeeInput(String(sessionFee));},style:{background:"none",color:C.muted,fontSize:12,flexShrink:0}},"✕")
+            )
+          :React.createElement("div",{style:{display:"flex",alignItems:"center",gap:10}},
+              React.createElement("span",{style:{fontSize:12,color:C.muted}},"Valor por sesión:"),
+              React.createElement("span",{style:{fontSize:14,fontWeight:600,color:C.text}},"$"+sessionFee.toLocaleString()),
+              React.createElement("button",{onClick:()=>{setEditFee(true);setFeeInput(String(sessionFee));},style:{background:C.surface,border:"1px solid "+C.border,borderRadius:6,color:C.muted,fontSize:11,padding:"3px 8px"}},"✏")
+            )
       )
     ),
     React.createElement(FreqCard,{patient,data,setData}),
@@ -994,7 +1015,7 @@ function Chatbot({dataRef,setData,setTab}){
     const newMsgs=[...msgs,{role:"user",content:txt}];
     setMsgs(newMsgs);setInput("");setLoading(true);
     try{
-      const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json","x-api-key":apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},body:JSON.stringify({model:"claude-haiku-4-5",max_tokens:500,system:buildCtx(),messages:newMsgs.map(m=>({role:m.role,content:m.content}))})});
+      const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json","x-api-key":apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:500,system:buildCtx(),messages:newMsgs.map(m=>({role:m.role,content:m.content}))})});
       if(!res.ok){const e=await res.json().catch(()=>({}));throw new Error(e.error&&e.error.message?e.error.message:"HTTP "+res.status);}
       const d=await res.json();
       setMsgs(m=>[...m,{role:"assistant",content:(d.content&&d.content[0]&&d.content[0].text)||"Sin respuesta"}]);
@@ -1024,7 +1045,7 @@ function Chatbot({dataRef,setData,setTab}){
 
 // ─── LEDGER ───────────────────────────────────────────────────────────────────
 function buildLedger(patient,appointments,payments,scopeMonth){
-  const fee=DEFAULT_FEE,rows=[];
+  const fee=patient.sessionFee||DEFAULT_FEE,rows=[];
   const sessions=appointments.filter(a=>a.patientId===patient.id&&(a.status==="confirmed"||a.status==="done")).filter(a=>!scopeMonth||a.date.startsWith(scopeMonth)).map(a=>({type:"session",date:a.date,time:a.time,label:"Sesión "+a.date+" "+a.time,amount:a.fee||fee,id:a.id}));
   const pays=payments.filter(p=>p.patientId===patient.id).filter(p=>!scopeMonth||p.date.startsWith(scopeMonth)).map(p=>({type:"payment",date:p.date,time:"",label:p.concept||"Pago",amount:p.amount,method:p.method,status:p.status,id:p.id}));
   const all=[...sessions,...pays].sort((a,b)=>a.date!==b.date?a.date.localeCompare(b.date):a.time.localeCompare(b.time));
