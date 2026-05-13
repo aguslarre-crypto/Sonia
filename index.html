@@ -123,7 +123,7 @@ function Sheet({onClose,title,children}){
 // ─── NOTIFICATION ENGINE ─────────────────────────────────────────────────────
 function useNotifications(data,setData){
   const permRef=useRef(false);
-  const [prompt,setPrompt]=useState(null);
+  const [endOfDayPrompt,setEODPrompt]=useState(null); // {appts:[...]}
   const [dailyBrief,setDailyBrief]=useState(null);
 
   const requestPerm=useCallback(async()=>{
@@ -135,71 +135,138 @@ function useNotifications(data,setData){
     return permRef.current;
   },[]);
 
-  // Daily briefing on app open
+  // ── Auto-schedule patients with frequency for current month ────────────────
+  useEffect(()=>{
+    const todayStr=getToday();
+    const monthKey="sonia_autosched_"+todayStr.slice(0,7);
+    if(localStorage.getItem(monthKey))return; // already done this month
+    const patientsWithFreq=data.patients.filter(p=>p.frequency&&p.frequency!=="none"&&p.preferredDay!==undefined&&p.preferredTime);
+    if(patientsWithFreq.length===0)return;
+    setData(d=>{
+      let newAppts=[...d.appointments];
+      let changed=false;
+      d.patients.forEach(p=>{
+        if(!p.frequency||p.frequency==="none"||p.preferredDay===undefined||!p.preferredTime)return;
+        const sessions=autoScheduleSessions(p,newAppts,5); // 5 weeks covers the month
+        sessions.forEach(function(s){
+          newAppts.push({id:Date.now()+Math.random(),patientId:p.id,patientName:p.name,date:s.date,time:s.time,duration:50,status:"confirmed",fee:p.sessionFee||DEFAULT_FEE});
+          changed=true;
+        });
+      });
+      if(changed){
+        localStorage.setItem(monthKey,"1");
+        return{...d,appointments:newAppts};
+      }
+      localStorage.setItem(monthKey,"1");
+      return d;
+    });
+  // eslint-disable-next-line
+  },[]);
+
+  // ── Daily briefing on app open ─────────────────────────────────────────────
   useEffect(()=>{
     const todayStr=getToday();
     const lastShown=localStorage.getItem("sonia_brief_date");
     if(lastShown===todayStr)return;
-    const todayAppts=data.appointments.filter(a=>a.date===todayStr&&a.status!=="cancelled").sort((a,b)=>a.time.localeCompare(b.time));
-    const withFuture=new Set(data.appointments.filter(a=>a.date>=todayStr&&a.status!=="cancelled").map(a=>a.patientId));
-    const sinHora=data.patients.filter(p=>!withFuture.has(p.id));
+
+    const todayAppts=data.appointments
+      .filter(a=>a.date===todayStr&&a.status!=="cancelled")
+      .sort((a,b)=>a.time.localeCompare(b.time));
+
+    // "Sin hora" = patients who have NO future confirmed appointment AND no frequency set
+    // Patients with frequency will be auto-scheduled, so exclude them from the warning
+    const withFuture=new Set(data.appointments
+      .filter(a=>a.date>=todayStr&&a.status!=="cancelled")
+      .map(a=>a.patientId));
+    const sinHora=data.patients.filter(p=>{
+      if(withFuture.has(p.id))return false; // has upcoming appt
+      if(p.frequency&&p.frequency!=="none")return false; // has frequency, will be auto-scheduled
+      return true; // truly unscheduled
+    });
+
     const isMonday=new Date(todayStr+"T12:00:00").getDay()===1;
-    if(todayAppts.length>0||sinHora.length>0){
-      setDailyBrief({appts:todayAppts,sinHora,isMonday});
-      localStorage.setItem("sonia_brief_date",todayStr);
-      if(Notification.permission==="granted"){
-        let body=todayAppts.length>0?"Hoy: "+todayAppts.map(a=>a.time+" "+a.patientName).join(", "):"Sin citas hoy.";
-        if(sinHora.length>0)body+=" Sin hora: "+sinHora.map(p=>p.name.split(" ")[0]).join(", ");
-        try{new Notification("🌿 Sonia — Agenda del día",{body,icon:"./icon-192.png",tag:"morning"});}catch(e){}
-      }
+    setDailyBrief({appts:todayAppts,sinHora,isMonday});
+    localStorage.setItem("sonia_brief_date",todayStr);
+
+    if(Notification.permission==="granted"){
+      let body=todayAppts.length>0
+        ?"Hoy: "+todayAppts.map(a=>a.time+" "+a.patientName).join(", ")
+        :"Sin citas hoy.";
+      if(isMonday&&sinHora.length>0)
+        body+=" | Sin hora: "+sinHora.map(p=>p.name.split(" ")[0]).join(", ");
+      try{new Notification("🌿 Sonia — Agenda del día",{body,icon:"./icon-192.png",tag:"morning"});}catch(e){}
     }
   // eslint-disable-next-line
   },[]);
 
-  // Post-session check every minute
+  // ── End-of-day confirmation: check once after last appt ends ───────────────
   useEffect(()=>{
     const check=()=>{
       const now=new Date();
       const todayStr=now.toISOString().split("T")[0];
       const nowMins=now.getHours()*60+now.getMinutes();
-      const c=data.appointments.filter(a=>{
-        if(a.date!==todayStr||a.status!=="confirmed"||a._prompted)return false;
-        const [hh,mm]=a.time.split(":").map(Number);
-        const diff=nowMins-(hh*60+mm+50);
-        return diff>=5&&diff<=90;
-      });
-      if(c.length>0&&!prompt){
-        const a=c[0];
-        setPrompt(a);
+      const eodKey="sonia_eod_"+todayStr;
+      if(localStorage.getItem(eodKey))return; // already prompted today
+
+      const todayConfirmed=data.appointments.filter(a=>
+        a.date===todayStr&&a.status==="confirmed"
+      );
+      if(todayConfirmed.length===0)return;
+
+      // Find the end time of the last appointment of the day
+      const lastAppt=todayConfirmed.reduce((prev,cur)=>
+        cur.time>prev.time?cur:prev
+      );
+      const[hh,mm]=lastAppt.time.split(":").map(Number);
+      const lastEndMins=hh*60+mm+50; // 50 min session
+      const diff=nowMins-lastEndMins;
+
+      // Show prompt 10-120 min after last session ends
+      if(diff>=10&&diff<=120){
+        setEODPrompt({appts:todayConfirmed});
+        localStorage.setItem(eodKey,"1");
         if(Notification.permission==="granted"){
-          try{new Notification("Sonia — Confirmar sesión",{body:"¿Se realizó la sesión de "+a.patientName+"?",icon:"./icon-192.png",tag:"session-"+a.id});}catch(e){}
+          try{new Notification("🌿 Sonia — Resumen del día",{
+            body:"Tenés "+todayConfirmed.length+" sesión"+(todayConfirmed.length>1?"es":"")+" para confirmar.",
+            icon:"./icon-192.png",tag:"eod"
+          });}catch(e){}
         }
       }
     };
     const t=setInterval(check,60000);
     check();
     return()=>clearInterval(t);
-  },[data.appointments,prompt]);
+  },[data.appointments,endOfDayPrompt]);
 
-  const resolvePrompt=useCallback((apptId,done,paid,fee,method)=>{
+  const resolveEOD=useCallback((results)=>{
+    // results = [{apptId, done, paid, method}]
     setData(d=>{
-      const appts=d.appointments.map(a=>a.id!==apptId?a:{...a,status:done?"done":"cancelled",_prompted:true});
-      let pays=d.payments;
-      if(done&&paid){
-        const a=d.appointments.find(a=>a.id===apptId);
-        if(a)pays=[...pays,{id:Date.now(),patientId:a.patientId,patientName:a.patientName,date:getToday(),amount:fee||DEFAULT_FEE,method:method||"efectivo",concept:"Sesión "+a.time,status:"paid"}];
-      }
+      let appts=[...d.appointments];
+      let pays=[...d.payments];
+      results.forEach(function(r){
+        appts=appts.map(a=>a.id!==r.apptId?a:{...a,status:r.done?"done":"cancelled"});
+        if(r.done&&r.paid){
+          const a=d.appointments.find(a=>a.id===r.apptId);
+          if(a)pays.push({id:Date.now()+Math.random(),patientId:a.patientId,patientName:a.patientName,
+            date:getToday(),amount:a.fee||DEFAULT_FEE,method:r.method||"efectivo",
+            concept:"Sesión "+a.time,status:"paid"});
+        }
+      });
       return{...d,appointments:appts,payments:pays};
     });
-    setPrompt(null);
+    setEODPrompt(null);
   },[setData]);
 
-  const dismissPrompt=useCallback(id=>{
-    setData(d=>({...d,appointments:d.appointments.map(a=>a.id===id?{...a,_prompted:true}:a)}));
-    setPrompt(null);
-  },[setData]);
+  const dismissEOD=useCallback(()=>setEODPrompt(null),[]);
 
-  return{requestPerm,prompt,resolvePrompt,dismissPrompt,dailyBrief,setDailyBrief};
+  // Keep backward compat: prompt/resolvePrompt/dismissPrompt (no longer used but App references them)
+  const prompt=null;
+  const resolvePrompt=useCallback(()=>{},[]);
+  const dismissPrompt=useCallback(()=>{},[]);
+
+  return{requestPerm,prompt,resolvePrompt,dismissPrompt,
+         endOfDayPrompt,resolveEOD,dismissEOD,
+         dailyBrief,setDailyBrief};
 }
 
 // ─── DAILY BRIEF BANNER ───────────────────────────────────────────────────────
@@ -228,37 +295,53 @@ function DailyBriefBanner({brief,onDismiss}){
   );
 }
 
-// ─── SESSION PROMPT ───────────────────────────────────────────────────────────
-function SessionPrompt({appt,onResolve,onDismiss}){
-  const[step,setStep]=useState("session");
-  const fee=appt.fee||DEFAULT_FEE;
-  const btn=(label,bg,color,onClick)=>React.createElement("button",{onClick,style:{background:bg,border:"1px solid "+color+"44",borderRadius:12,padding:"14px 0",color,fontSize:13,fontWeight:600,width:"100%"}},label);
-  return React.createElement("div",{className:"ov",onClick:()=>onDismiss(appt.id)},
+// ─── END OF DAY PROMPT ───────────────────────────────────────────────────────
+function EndOfDayPrompt({appts,onResolve,onDismiss}){
+  // Initialize each appt as done=true, paid=false, method="efectivo"
+  const[results,setResults]=useState(()=>appts.map(a=>({apptId:a.id,done:true,paid:false,method:"efectivo",name:a.patientName,time:a.time,fee:a.fee||DEFAULT_FEE})));
+  const setField=(apptId,field,val)=>setResults(rs=>rs.map(r=>r.apptId===apptId?{...r,[field]:val}:r));
+  const doneSessions=results.filter(r=>r.done);
+  const paidTotal=results.filter(r=>r.done&&r.paid).reduce((s,r)=>s+r.fee,0);
+
+  return React.createElement("div",{className:"ov",onClick:onDismiss},
     React.createElement("div",{className:"sh",onClick:e=>e.stopPropagation(),style:{paddingBottom:32}},
       React.createElement("div",{className:"hdl"}),
       React.createElement("div",{style:{textAlign:"center",marginBottom:20}},
-        React.createElement("div",{style:{fontSize:32,marginBottom:8}},"🔔"),
-        React.createElement("div",{style:{fontFamily:"Fraunces",fontSize:18,fontWeight:400,marginBottom:4}},step==="session"?"¿Cómo salió la sesión?":"¿Cómo se cobró?"),
-        React.createElement("div",{style:{fontSize:13,color:C.muted}},appt.patientName+" · "+appt.time+" · $"+fee.toLocaleString())
+        React.createElement("div",{style:{fontSize:28,marginBottom:6}},"🌙"),
+        React.createElement("div",{style:{fontFamily:"Fraunces",fontSize:18,fontWeight:400,marginBottom:4}},"Resumen del día"),
+        React.createElement("div",{style:{fontSize:13,color:C.muted}},appts.length+" sesión"+(appts.length>1?"es":"")+" para confirmar")
       ),
-      step==="session"&&React.createElement("div",null,
-        React.createElement("div",{style:{display:"flex",gap:10,marginBottom:16}},
-          btn("✓ Sí se realizó",C.green+"22",C.green,()=>setStep("payment")),
-          btn("✗ No se realizó",C.red+"22",C.red,()=>onResolve(appt.id,false,false,fee,"efectivo"))
-        ),
-        React.createElement("div",{style:{textAlign:"center"}},
-          React.createElement("button",{onClick:()=>onDismiss(appt.id),style:{background:"none",color:C.muted,fontSize:12,padding:"8px 0"}},"Preguntar después")
-        )
+      // Each appointment row
+      React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:10,marginBottom:20}},
+        results.map(r=>React.createElement("div",{key:r.apptId,style:{background:C.card,borderRadius:12,padding:"12px 14px",border:"1px solid "+(r.done?C.green+"44":C.red+"44")}},
+          // Row header: name + time + did it happen?
+          React.createElement("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:r.done?10:0}},
+            React.createElement("div",null,
+              React.createElement("span",{style:{fontWeight:600,fontSize:14,color:C.text}},r.name),
+              React.createElement("span",{style:{fontSize:12,color:C.muted,marginLeft:8}},r.time)
+            ),
+            React.createElement("div",{style:{display:"flex",gap:6}},
+              React.createElement("button",{onClick:()=>setField(r.apptId,"done",true),style:{padding:"5px 10px",borderRadius:8,border:"1px solid "+(r.done?C.green:C.border),background:r.done?C.green+"22":"transparent",color:r.done?C.green:C.muted,fontSize:12,fontWeight:600}},"✓ Sí"),
+              React.createElement("button",{onClick:()=>setField(r.apptId,"done",false),style:{padding:"5px 10px",borderRadius:8,border:"1px solid "+(!r.done?C.red:C.border),background:!r.done?C.red+"22":"transparent",color:!r.done?C.red:C.muted,fontSize:12,fontWeight:600}},"✗ No")
+            )
+          ),
+          // Payment row (only if session happened)
+          r.done&&React.createElement("div",{style:{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}},
+            React.createElement("span",{style:{fontSize:12,color:C.muted,minWidth:60}},"$"+r.fee.toLocaleString()+":"),
+            React.createElement("button",{onClick:()=>setField(r.apptId,"paid",false),style:{padding:"5px 10px",borderRadius:8,border:"1px solid "+(!r.paid?C.yellow:C.border),background:!r.paid?C.yellow+"22":"transparent",color:!r.paid?C.yellow:C.muted,fontSize:11,fontWeight:600}},"⏳ Pendiente"),
+            React.createElement("button",{onClick:()=>{setField(r.apptId,"paid",true);setField(r.apptId,"method","efectivo");},style:{padding:"5px 10px",borderRadius:8,border:"1px solid "+(r.paid&&r.method==="efectivo"?C.green:C.border),background:r.paid&&r.method==="efectivo"?C.green+"22":"transparent",color:r.paid&&r.method==="efectivo"?C.green:C.muted,fontSize:11,fontWeight:600}},"💵 Efectivo"),
+            React.createElement("button",{onClick:()=>{setField(r.apptId,"paid",true);setField(r.apptId,"method","digital");},style:{padding:"5px 10px",borderRadius:8,border:"1px solid "+(r.paid&&r.method==="digital"?C.accent:C.border),background:r.paid&&r.method==="digital"?C.accent+"22":"transparent",color:r.paid&&r.method==="digital"?C.al:C.muted,fontSize:11,fontWeight:600}},"📱 Digital")
+          )
+        ))
       ),
-      step==="payment"&&React.createElement("div",null,
-        React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:8,marginBottom:12}},
-          btn("💵 Cobré en efectivo",C.green+"22",C.green,()=>onResolve(appt.id,true,true,fee,"efectivo")),
-          btn("📱 Cobré de forma digital",C.accent+"22",C.al,()=>onResolve(appt.id,true,true,fee,"digital")),
-          btn("⏳ Queda pendiente de cobro",C.yellow+"22",C.yellow,()=>onResolve(appt.id,true,false,fee,"efectivo"))
-        ),
-        React.createElement("div",{style:{textAlign:"center"}},
-          React.createElement("button",{onClick:()=>setStep("session"),style:{background:"none",color:C.muted,fontSize:12}},"← Volver")
-        )
+      // Summary
+      React.createElement("div",{style:{background:C.bg,borderRadius:10,padding:"10px 14px",marginBottom:16,display:"flex",justifyContent:"space-between"}},
+        React.createElement("span",{style:{fontSize:12,color:C.muted}},doneSessions.length+" sesión"+(doneSessions.length!==1?"es":"")+" realizadas"),
+        React.createElement("span",{style:{fontSize:13,fontWeight:600,color:C.green}},"$"+paidTotal.toLocaleString()+" cobrado")
+      ),
+      React.createElement("div",{style:{display:"flex",gap:8}},
+        React.createElement("button",{onClick:onDismiss,style:{flex:1,background:C.surface,border:"1px solid "+C.border,borderRadius:10,padding:"12px 0",color:C.muted,fontSize:13,cursor:"pointer"}},"Después"),
+        React.createElement("button",{onClick:()=>onResolve(results),style:{flex:2,background:C.accent,border:"none",borderRadius:10,padding:"12px 0",color:"#fff",fontSize:13,fontWeight:600,cursor:"pointer"}},"Confirmar todo")
       )
     )
   );
@@ -818,6 +901,13 @@ function PatientProfile({patient,data,setData,onBack}){
   const[pf,setPF]=useState({amount:String(patient.sessionFee||DEFAULT_FEE),method:"efectivo",concept:"",date:getToday()});
   const lp=data.patients.find(p=>p.id===patient.id)||patient;
   const sessionFee=lp.sessionFee||DEFAULT_FEE;
+
+  // Monthly balance: sessions this month × fee − payments this month
+  const thisMonth=getToday().slice(0,7);
+  const monthSessions=appointments.filter(a=>a.patientId===patient.id&&a.date.startsWith(thisMonth)&&(a.status==="confirmed"||a.status==="done"));
+  const monthPaid=payments.filter(p=>p.patientId===patient.id&&p.date.startsWith(thisMonth)&&p.status==="paid").reduce((s,p)=>s+p.amount,0);
+  const monthDebt=monthSessions.length*sessionFee-monthPaid;
+  const monthTotal=monthSessions.length*sessionFee;
   const pA=appointments.filter(a=>a.patientId===patient.id).sort((a,b)=>b.date.localeCompare(a.date));
   const pP=payments.filter(p=>p.patientId===patient.id).sort((a,b)=>b.date.localeCompare(a.date));
   const pN=notes.filter(n=>n.patientId===patient.id).sort((a,b)=>b.date.localeCompare(a.date));
@@ -861,6 +951,28 @@ function PatientProfile({patient,data,setData,onBack}){
       )
     ),
     React.createElement(FreqCard,{patient,data,setData}),
+    // ── Monthly balance card ──
+    monthTotal>0&&React.createElement(Card,{style:{marginBottom:14,borderColor:monthDebt>0?C.red+"55":C.green+"55",background:monthDebt>0?"#1a0a0a":"#0a1a0e"}},
+      React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}},
+        React.createElement("div",null,
+          React.createElement("div",{style:{fontSize:11,fontWeight:600,color:C.muted,textTransform:"uppercase",letterSpacing:.5,marginBottom:3}},"💳 Balance "+thisMonth),
+          React.createElement("div",{style:{fontSize:11,color:C.muted}},monthSessions.length+" sesión"+(monthSessions.length!==1?"es":"")+" × $"+sessionFee.toLocaleString())
+        ),
+        React.createElement("div",{style:{textAlign:"right"}},
+          React.createElement("div",{style:{fontSize:24,fontWeight:700,fontFamily:"Fraunces",color:monthDebt>0?C.red:C.green}},
+            (monthDebt>0?"-":"")+"$"+Math.abs(monthDebt).toLocaleString()
+          ),
+          React.createElement("div",{style:{fontSize:11,color:C.muted}},monthDebt>0?"pendiente de cobro":"al día ✓")
+        )
+      ),
+      monthTotal>0&&React.createElement("div",{style:{background:C.bg,borderRadius:8,height:8,overflow:"hidden"}},
+        React.createElement("div",{style:{height:"100%",width:Math.min(100,Math.round(monthPaid/monthTotal*100))+"%",background:monthDebt>0?C.green:C.green,borderRadius:8,transition:"width .4s ease",minWidth:monthPaid>0?8:0}})
+      ),
+      monthTotal>0&&React.createElement("div",{style:{display:"flex",justifyContent:"space-between",marginTop:4}},
+        React.createElement("span",{style:{fontSize:10,color:C.green}},"$"+monthPaid.toLocaleString()+" cobrado"),
+        React.createElement("span",{style:{fontSize:10,color:C.muted}},"$"+monthTotal.toLocaleString()+" total")
+      )
+    ),
     React.createElement(SchemeCard,{patient,data,setData,pA,pP}),
     React.createElement("div",{style:{display:"flex",gap:6,marginBottom:12,overflowX:"auto",paddingBottom:4}},
       tabs.map(t=>React.createElement("button",{key:t.id,className:"pill",onClick:()=>setTab(t.id),style:{background:tab===t.id?C.accent:"transparent",color:tab===t.id?"#fff":C.muted,borderColor:tab===t.id?C.accent:C.border}},t.l))
@@ -1402,7 +1514,7 @@ function App(){
   const dataRef=useRef(data);
   useEffect(()=>{dataRef.current=data;},[data]);
   useEffect(()=>saveData(data),[data]);
-  const{requestPerm,prompt,resolvePrompt,dismissPrompt,dailyBrief,setDailyBrief}=useNotifications(data,setData);
+  const{requestPerm,prompt,resolvePrompt,dismissPrompt,endOfDayPrompt,resolveEOD,dismissEOD,dailyBrief,setDailyBrief}=useNotifications(data,setData);
   useEffect(()=>{requestPerm();},[]);
   const changeTab=newTab=>{if(tab==="pagos"&&newTab!=="pagos")setPinUnlocked(false);setTab(newTab);};
   const pinActive=data.paymentsPin&&data.paymentsPin.length===4;
@@ -1471,7 +1583,8 @@ function App(){
       ))
     ),
     tab!=="chat"&&React.createElement(MicButton,{dataRef,setData,setTab:changeTab,setSlotDays}),
-    prompt&&React.createElement(SessionPrompt,{appt:prompt,onResolve:resolvePrompt,onDismiss:dismissPrompt}),
+    prompt&&React.createElement(EndOfDayPrompt,{appts:[],onResolve:resolveEOD,onDismiss:dismissEOD}),
+    endOfDayPrompt&&React.createElement(EndOfDayPrompt,{appts:endOfDayPrompt.appts,onResolve:resolveEOD,onDismiss:dismissEOD}),
     dailyBrief&&React.createElement(DailyBriefBanner,{brief:dailyBrief,onDismiss:()=>setDailyBrief(null)})
   );
 }
